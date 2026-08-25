@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Resultados generados por OCR
+Resultados_OCR/
+
+# Comprobantes e imágenes de prueba
+Comprobantes/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.webp
+
+# Información sensible
+txt_comprobantes/
+
+# Modelos pesados
+*.onnx
+*.pdmodel
+*.pdiparams
+*.pdparams
+*.pth
+*.pt
+
+# Temporales
+*.tmp
+*.temp
+*.bak
