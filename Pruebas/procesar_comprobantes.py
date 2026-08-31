@@ -117,6 +117,7 @@ def procesar_banco(nombre_banco):
     if not carpeta_banco.exists():
 
         print("ERROR:")
+
         print(
             "No existe la carpeta del banco."
         )
@@ -255,12 +256,33 @@ def procesar_banco(nombre_banco):
             # ------------------------------------------------
             # OCR
             # ------------------------------------------------
+            #
+            # IMPORTANTE:
+            #
+            # Solamente Santander utiliza el
+            # reprocesamiento especial.
+            #
+            # Los demás bancos continúan exactamente
+            # con el procesamiento normal.
+            #
+            # ------------------------------------------------
 
-            resultado = (
-                ocr.procesar_imagen(
-                    str(archivo)
+            if nombre_banco == "SANTANDER":
+
+                resultado = (
+                    ocr.procesar_imagen(
+                        str(archivo),
+                        reprocesar_santander=True
+                    )
                 )
-            )
+
+            else:
+
+                resultado = (
+                    ocr.procesar_imagen(
+                        str(archivo)
+                    )
+                )
 
             # ------------------------------------------------
             # CREAR JSON
@@ -498,6 +520,10 @@ def main():
 
         print(
             "python -m Pruebas.procesar_comprobantes HSBC"
+        )
+
+        print(
+            "python -m Pruebas.procesar_comprobantes SANTANDER"
         )
 
         print()

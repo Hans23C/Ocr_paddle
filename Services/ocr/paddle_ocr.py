@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 import os
+
+from PIL import Image
 
 
 @dataclass
@@ -34,30 +36,51 @@ class ResultadoOCR:
 class PaddleOCRServicio:
 
     def __init__(self, idioma="es"):
+
         self.idioma = idioma
 
         self.ocr = self._crear_ocr()
 
+    # ========================================================
+    # CREAR OCR
+    # ========================================================
+
     def _crear_ocr(self):
 
-       from paddleocr import PaddleOCR
+        from paddleocr import PaddleOCR
 
-       return PaddleOCR(
-        lang=self.idioma,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=True,
-        enable_mkldnn=False,
-    )
+        return PaddleOCR(
+            lang=self.idioma,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=True,
+            enable_mkldnn=False,
+        )
 
-    def procesar_imagen(self, ruta_imagen: str) -> ResultadoOCR:
+    # ========================================================
+    # PROCESAR IMAGEN
+    # ========================================================
+
+    def procesar_imagen(
+       self,
+       ruta_imagen: str,
+       reprocesar_nu: bool = False,
+       reprocesar_santander: bool = False
+       ) -> ResultadoOCR:
 
         if not os.path.isfile(ruta_imagen):
+
             raise FileNotFoundError(
                 f"No existe la imagen: {ruta_imagen}"
             )
 
-        resultado = self.ocr.predict(ruta_imagen)
+        # ----------------------------------------------------
+        # OCR NORMAL
+        # ----------------------------------------------------
+
+        resultado = self.ocr.predict(
+            ruta_imagen
+        )
 
         detecciones = []
 
@@ -66,7 +89,9 @@ class PaddleOCRServicio:
 
         for pagina in resultado:
 
-            datos = self._obtener_datos(pagina)
+            datos = self._obtener_datos(
+                pagina
+            )
 
             if datos is None:
                 continue
@@ -91,7 +116,9 @@ class PaddleOCRServicio:
                 cajas
             ):
 
-                texto = str(texto).strip()
+                texto = str(
+                    texto
+                ).strip()
 
                 if not texto:
                     continue
@@ -104,17 +131,69 @@ class PaddleOCRServicio:
                     alto_imagen=alto_imagen,
                 )
 
-                detecciones.append(deteccion)
+                detecciones.append(
+                    deteccion
+                )
 
-        detecciones = self._ordenar_detecciones(
-            detecciones
+        # ----------------------------------------------------
+        # REPROCESAMIENTO ESPECIAL NU
+        # ----------------------------------------------------
+
+        if reprocesar_nu:
+
+            detecciones_nu = (
+                self._reprocesar_region_superior_nu(
+                    ruta_imagen,
+                    ancho_imagen,
+                    alto_imagen
+                )
+            )
+
+            detecciones.extend(
+                detecciones_nu
+            )
+
+                # ----------------------------------------------------
+        # REPROCESAMIENTO ESPECIAL SANTANDER
+        # ----------------------------------------------------
+
+        if reprocesar_santander:
+
+            detecciones_santander = (
+                self._reprocesar_region_santander(
+                    ruta_imagen,
+                    ancho_imagen,
+                    alto_imagen
+                )
+            )
+
+            detecciones.extend(
+                detecciones_santander
+            )
+
+        # ----------------------------------------------------
+        # ORDENAR
+        # ----------------------------------------------------
+
+        detecciones = (
+            self._ordenar_detecciones(
+                detecciones
+            )
         )
 
-        lineas = self._reconstruir_lineas(
-            detecciones
+        # ----------------------------------------------------
+        # RECONSTRUIR LÍNEAS
+        # ----------------------------------------------------
+
+        lineas = (
+            self._reconstruir_lineas(
+                detecciones
+            )
         )
 
-        texto_completo = "\n".join(lineas)
+        texto_completo = "\n".join(
+            lineas
+        )
 
         return ResultadoOCR(
             detecciones=detecciones,
@@ -124,24 +203,426 @@ class PaddleOCRServicio:
             alto_imagen=alto_imagen,
         )
 
-    def _obtener_datos(self, pagina):
+    # ========================================================
+    # REPROCESAMIENTO REGIÓN SUPERIOR NU
+    # ========================================================
+
+    def _reprocesar_region_superior_nu(
+        self,
+        ruta_imagen,
+        ancho_imagen,
+        alto_imagen
+    ):
+
+        # ----------------------------------------------------
+        # CONFIGURACIÓN COMPROBADA
+        # ----------------------------------------------------
+
+        Y_INICIO = 120
+        Y_FIN = 250
+
+        FACTOR_ESCALA = 4
+
+        detecciones = []
+
+        imagen = Image.open(
+            ruta_imagen
+        ).convert("RGB")
+
+        # ----------------------------------------------------
+        # VALIDAR DIMENSIONES
+        # ----------------------------------------------------
+
+        y_fin_real = min(
+            Y_FIN,
+            imagen.height
+        )
+
+        if Y_INICIO >= y_fin_real:
+
+            return []
+
+        # ----------------------------------------------------
+        # RECORTE
+        # ----------------------------------------------------
+
+        recorte = imagen.crop(
+            (
+                0,
+                Y_INICIO,
+                imagen.width,
+                y_fin_real
+            )
+        )
+
+        # ----------------------------------------------------
+        # AMPLIAR
+        # ----------------------------------------------------
+
+        recorte = recorte.resize(
+            (
+                recorte.width
+                * FACTOR_ESCALA,
+
+                recorte.height
+                * FACTOR_ESCALA
+            ),
+            Image.Resampling.LANCZOS
+        )
+
+        # ----------------------------------------------------
+        # GUARDAR TEMPORALMENTE
+        # ----------------------------------------------------
+
+        ruta_temporal = (
+            ruta_imagen
+            + ".nu_reproceso.jpg"
+        )
+
+        recorte.save(
+            ruta_temporal,
+            quality=100
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # SEGUNDO OCR
+            # ------------------------------------------------
+
+            resultado = self.ocr.predict(
+                ruta_temporal
+            )
+
+            for pagina in resultado:
+
+                datos = self._obtener_datos(
+                    pagina
+                )
+
+                if datos is None:
+                    continue
+
+                textos = datos["textos"]
+                scores = datos["scores"]
+                cajas = datos["cajas"]
+
+                for texto, score, bbox in zip(
+                    textos,
+                    scores,
+                    cajas
+                ):
+
+                    texto = str(
+                        texto
+                    ).strip()
+
+                    if not texto:
+                        continue
+
+                    # ----------------------------------------
+                    # CONVERTIR BBOX A COORDENADAS ORIGINALES
+                    # ----------------------------------------
+
+                    puntos_originales = []
+
+                    for punto in bbox:
+
+                        x = (
+                            float(punto[0])
+                            / FACTOR_ESCALA
+                        )
+
+                        y = (
+                            float(punto[1])
+                            / FACTOR_ESCALA
+                            + Y_INICIO
+                        )
+
+                        puntos_originales.append(
+                            [
+                                x,
+                                y
+                            ]
+                        )
+
+                    # ----------------------------------------
+                    # CREAR DETECCIÓN
+                    # ----------------------------------------
+
+                    deteccion = self._crear_deteccion(
+                        texto=texto,
+                        confianza=float(score),
+                        bbox=puntos_originales,
+                        ancho_imagen=ancho_imagen,
+                        alto_imagen=alto_imagen,
+                    )
+
+                    detecciones.append(
+                        deteccion
+                    )
+
+        finally:
+
+            # ------------------------------------------------
+            # ELIMINAR ARCHIVO TEMPORAL
+            # ------------------------------------------------
+
+            try:
+
+                if os.path.exists(
+                    ruta_temporal
+                ):
+
+                    os.remove(
+                        ruta_temporal
+                    )
+
+            except Exception:
+
+                pass
+
+        return detecciones
+        # ========================================================
+    # REPROCESAMIENTO REGIÓN FECHA/HORA SANTANDER
+    # ========================================================
+
+    def _reprocesar_region_santander(
+        self,
+        ruta_imagen,
+        ancho_imagen,
+        alto_imagen
+    ):
+
+        # ----------------------------------------------------
+        # CONFIGURACIÓN SANTANDER
+        # ----------------------------------------------------
+
+        # Región donde normalmente aparece:
+        #
+        # Fecha y hora de operación
+        # 31/may/26 - 09:38
+        #
+        # En image_339 el OCR normal detectó:
+        #
+        # 1/  /9:38
+        #
+        # Por eso solamente reprocesamos esta zona.
+
+        Y_INICIO = 580
+        Y_FIN = 730
+
+        FACTOR_ESCALA = 4
+
+        detecciones = []
+
+        imagen = Image.open(
+            ruta_imagen
+        ).convert("RGB")
+
+        # ----------------------------------------------------
+        # VALIDAR DIMENSIONES
+        # ----------------------------------------------------
+
+        y_fin_real = min(
+            Y_FIN,
+            imagen.height
+        )
+
+        if Y_INICIO >= y_fin_real:
+
+            return []
+
+        # ----------------------------------------------------
+        # RECORTE
+        # ----------------------------------------------------
+
+        recorte = imagen.crop(
+            (
+                0,
+                Y_INICIO,
+                imagen.width,
+                y_fin_real
+            )
+        )
+
+        # ----------------------------------------------------
+        # AMPLIAR
+        # ----------------------------------------------------
+
+        recorte = recorte.resize(
+            (
+                recorte.width
+                * FACTOR_ESCALA,
+
+                recorte.height
+                * FACTOR_ESCALA
+            ),
+            Image.Resampling.LANCZOS
+        )
+
+        # ----------------------------------------------------
+        # GUARDAR TEMPORALMENTE
+        # ----------------------------------------------------
+
+        ruta_temporal = (
+            ruta_imagen
+            + ".santander_reproceso.jpg"
+        )
+
+        recorte.save(
+            ruta_temporal,
+            quality=100
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # SEGUNDO OCR
+            # ------------------------------------------------
+
+            resultado = self.ocr.predict(
+                ruta_temporal
+            )
+
+            for pagina in resultado:
+
+                datos = self._obtener_datos(
+                    pagina
+                )
+
+                if datos is None:
+
+                    continue
+
+                textos = datos["textos"]
+                scores = datos["scores"]
+                cajas = datos["cajas"]
+
+                for texto, score, bbox in zip(
+                    textos,
+                    scores,
+                    cajas
+                ):
+
+                    texto = str(
+                        texto
+                    ).strip()
+
+                    if not texto:
+
+                        continue
+
+                    # ----------------------------------------
+                    # CONVERTIR BBOX A COORDENADAS ORIGINALES
+                    # ----------------------------------------
+
+                    puntos_originales = []
+
+                    for punto in bbox:
+
+                        x = (
+                            float(punto[0])
+                            / FACTOR_ESCALA
+                        )
+
+                        y = (
+                            float(punto[1])
+                            / FACTOR_ESCALA
+                            + Y_INICIO
+                        )
+
+                        puntos_originales.append(
+                            [
+                                x,
+                                y
+                            ]
+                        )
+
+                    # ----------------------------------------
+                    # CREAR DETECCIÓN
+                    # ----------------------------------------
+
+                    deteccion = self._crear_deteccion(
+                        texto=texto,
+                        confianza=float(score),
+                        bbox=puntos_originales,
+                        ancho_imagen=ancho_imagen,
+                        alto_imagen=alto_imagen,
+                    )
+
+                    detecciones.append(
+                        deteccion
+                    )
+
+        finally:
+
+            # ------------------------------------------------
+            # ELIMINAR ARCHIVO TEMPORAL
+            # ------------------------------------------------
+
+            try:
+
+                if os.path.exists(
+                    ruta_temporal
+                ):
+
+                    os.remove(
+                        ruta_temporal
+                    )
+
+            except Exception:
+
+                pass
+
+        return detecciones
+
+    # ========================================================
+    # OBTENER DATOS
+    # ========================================================
+
+    def _obtener_datos(
+        self,
+        pagina
+    ):
 
         textos = None
         scores = None
         cajas = None
 
+        # ----------------------------------------------------
         # PaddleOCR 3.x
-        if hasattr(pagina, "rec_texts"):
+        # ----------------------------------------------------
+
+        if hasattr(
+            pagina,
+            "rec_texts"
+        ):
+
             textos = pagina.rec_texts
 
-        if hasattr(pagina, "rec_scores"):
+        if hasattr(
+            pagina,
+            "rec_scores"
+        ):
+
             scores = pagina.rec_scores
 
-        if hasattr(pagina, "rec_polys"):
+        if hasattr(
+            pagina,
+            "rec_polys"
+        ):
+
             cajas = pagina.rec_polys
 
-        # En caso de que el resultado sea tipo diccionario
-        if isinstance(pagina, dict):
+        # ----------------------------------------------------
+        # DICCIONARIO
+        # ----------------------------------------------------
+
+        if isinstance(
+            pagina,
+            dict
+        ):
 
             textos = pagina.get(
                 "rec_texts",
@@ -159,14 +640,21 @@ class PaddleOCRServicio:
             )
 
         if textos is None or cajas is None:
+
             return None
 
         if scores is None:
-            scores = [1.0] * len(textos)
 
-        ancho, alto = self._obtener_dimensiones(
-            pagina,
-            cajas
+            scores = [
+                1.0
+                for _ in textos
+            ]
+
+        ancho, alto = (
+            self._obtener_dimensiones(
+                pagina,
+                cajas
+            )
         )
 
         return {
@@ -177,13 +665,16 @@ class PaddleOCRServicio:
             "alto": alto,
         }
 
+    # ========================================================
+    # DIMENSIONES
+    # ========================================================
+
     def _obtener_dimensiones(
         self,
         pagina,
         cajas
     ):
 
-        # Intentar obtener dimensiones desde PaddleOCR
         for atributo in (
             "input_img",
             "img"
@@ -198,14 +689,20 @@ class PaddleOCRServicio:
             if imagen is not None:
 
                 try:
-                    alto, ancho = imagen.shape[:2]
 
-                    return int(ancho), int(alto)
+                    alto, ancho = (
+                        imagen.shape[:2]
+                    )
+
+                    return (
+                        int(ancho),
+                        int(alto)
+                    )
 
                 except Exception:
+
                     pass
 
-        # Como respaldo usamos las coordenadas
         max_x = 0
         max_y = 0
 
@@ -225,7 +722,14 @@ class PaddleOCRServicio:
                         float(punto[1])
                     )
 
-        return int(max_x), int(max_y)
+        return (
+            int(max_x),
+            int(max_y)
+        )
+
+    # ========================================================
+    # CREAR DETECCIÓN
+    # ========================================================
 
     def _crear_deteccion(
         self,
@@ -260,8 +764,13 @@ class PaddleOCRServicio:
         x_max = max(xs)
         y_max = max(ys)
 
-        ancho = x_max - x
-        alto = y_max - y
+        ancho = (
+            x_max - x
+        )
+
+        alto = (
+            y_max - y
+        )
 
         ancho_seguro = max(
             ancho_imagen,
@@ -276,18 +785,39 @@ class PaddleOCRServicio:
         return OCRDeteccion(
             texto=texto,
             confianza=confianza,
+
             bbox=puntos,
 
             x=x,
             y=y,
+
             ancho=ancho,
             alto=alto,
 
-            x_rel=x / ancho_seguro,
-            y_rel=y / alto_seguro,
-            ancho_rel=ancho / ancho_seguro,
-            alto_rel=alto / alto_seguro,
+            x_rel=(
+                x
+                / ancho_seguro
+            ),
+
+            y_rel=(
+                y
+                / alto_seguro
+            ),
+
+            ancho_rel=(
+                ancho
+                / ancho_seguro
+            ),
+
+            alto_rel=(
+                alto
+                / alto_seguro
+            ),
         )
+
+    # ========================================================
+    # ORDENAR DETECCIONES
+    # ========================================================
 
     def _ordenar_detecciones(
         self,
@@ -302,18 +832,26 @@ class PaddleOCRServicio:
             )
         )
 
+    # ========================================================
+    # RECONSTRUIR LÍNEAS
+    # ========================================================
+
     def _reconstruir_lineas(
         self,
         detecciones
     ):
 
         if not detecciones:
+
             return []
 
-        altura_promedio = sum(
-            d.alto
-            for d in detecciones
-        ) / len(detecciones)
+        altura_promedio = (
+            sum(
+                d.alto
+                for d in detecciones
+            )
+            / len(detecciones)
+        )
 
         tolerancia_y = max(
             altura_promedio * 0.6,
@@ -328,22 +866,29 @@ class PaddleOCRServicio:
 
             for grupo in grupos:
 
-                promedio_y = sum(
-                    d.y
-                    for d in grupo
-                ) / len(grupo)
+                promedio_y = (
+                    sum(
+                        d.y
+                        for d in grupo
+                    )
+                    / len(grupo)
+                )
 
                 if abs(
-                    deteccion.y - promedio_y
+                    deteccion.y
+                    - promedio_y
                 ) <= tolerancia_y:
 
                     grupo_encontrado = grupo
+
                     break
 
             if grupo_encontrado is None:
 
                 grupos.append(
-                    [deteccion]
+                    [
+                        deteccion
+                    ]
                 )
 
             else:
@@ -371,6 +916,8 @@ class PaddleOCRServicio:
 
             if texto:
 
-                lineas.append(texto)
+                lineas.append(
+                    texto
+                )
 
         return lineas
