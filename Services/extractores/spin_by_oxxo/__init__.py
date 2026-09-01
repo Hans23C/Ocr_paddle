@@ -1,0 +1,1 @@
+from .spin_by_oxxo import SpinByOxxoExtractor
