@@ -153,7 +153,7 @@ class PaddleOCRServicio:
                 detecciones_nu
             )
 
-                # ----------------------------------------------------
+        # ----------------------------------------------------
         # REPROCESAMIENTO ESPECIAL SANTANDER
         # ----------------------------------------------------
 
@@ -383,7 +383,8 @@ class PaddleOCRServicio:
                 pass
 
         return detecciones
-        # ========================================================
+
+    # ========================================================
     # REPROCESAMIENTO REGIÓN FECHA/HORA SANTANDER
     # ========================================================
 
@@ -576,6 +577,521 @@ class PaddleOCRServicio:
                 pass
 
         return detecciones
+
+    # ========================================================
+    # REPROCESAMIENTO REGIÓN SUPERIOR KLAR
+    # ========================================================
+
+    def _reprocesar_region_klar(
+        self,
+        ruta_imagen,
+        ancho_imagen,
+        alto_imagen
+    ):
+
+        # ----------------------------------------------------
+        # CONFIGURACIÓN KLAR
+        # ----------------------------------------------------
+
+        PORCENTAJE_Y_INICIO = 0.25
+        PORCENTAJE_Y_FIN = 0.65
+
+        FACTOR_ESCALA = 4
+
+        detecciones = []
+
+        imagen = Image.open(
+            ruta_imagen
+        ).convert("RGB")
+
+        # ----------------------------------------------------
+        # CALCULAR REGIÓN REAL
+        # ----------------------------------------------------
+
+        y_inicio = int(
+            imagen.height
+            * PORCENTAJE_Y_INICIO
+        )
+
+        y_fin = int(
+            imagen.height
+            * PORCENTAJE_Y_FIN
+        )
+
+        # ----------------------------------------------------
+        # VALIDAR DIMENSIONES
+        # ----------------------------------------------------
+
+        y_inicio = max(
+            0,
+            y_inicio
+        )
+
+        y_fin_real = min(
+            y_fin,
+            imagen.height
+        )
+
+        if y_inicio >= y_fin_real:
+
+            return []
+
+        # ----------------------------------------------------
+        # RECORTE
+        # ----------------------------------------------------
+
+        recorte = imagen.crop(
+            (
+                0,
+                y_inicio,
+                imagen.width,
+                y_fin_real
+            )
+        )
+
+        # ----------------------------------------------------
+        # AMPLIAR
+        # ----------------------------------------------------
+
+        recorte = recorte.resize(
+            (
+                recorte.width
+                * FACTOR_ESCALA,
+
+                recorte.height
+                * FACTOR_ESCALA
+            ),
+            Image.Resampling.LANCZOS
+        )
+
+        # ----------------------------------------------------
+        # GUARDAR TEMPORALMENTE
+        # ----------------------------------------------------
+
+        ruta_temporal = (
+            ruta_imagen
+            + ".klar_reproceso.jpg"
+        )
+
+        recorte.save(
+            ruta_temporal,
+            quality=100
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # SEGUNDO OCR
+            # ------------------------------------------------
+
+            resultado = self.ocr.predict(
+                ruta_temporal
+            )
+
+            for pagina in resultado:
+
+                datos = self._obtener_datos(
+                    pagina
+                )
+
+                if datos is None:
+
+                    continue
+
+                textos = datos["textos"]
+                scores = datos["scores"]
+                cajas = datos["cajas"]
+
+                for texto, score, bbox in zip(
+                    textos,
+                    scores,
+                    cajas
+                ):
+
+                    texto = str(
+                        texto
+                    ).strip()
+
+                    if not texto:
+
+                        continue
+
+                    # ----------------------------------------
+                    # CONVERTIR BBOX
+                    # A COORDENADAS ORIGINALES
+                    # ----------------------------------------
+
+                    puntos_originales = []
+
+                    for punto in bbox:
+
+                        x = (
+                            float(
+                                punto[0]
+                            )
+                            / FACTOR_ESCALA
+                        )
+
+                        y = (
+                            float(
+                                punto[1]
+                            )
+                            / FACTOR_ESCALA
+                            + y_inicio
+                        )
+
+                        puntos_originales.append(
+                            [
+                                x,
+                                y
+                            ]
+                        )
+
+                    # ----------------------------------------
+                    # CREAR DETECCIÓN
+                    # ----------------------------------------
+
+                    deteccion = self._crear_deteccion(
+                        texto=texto,
+                        confianza=float(score),
+                        bbox=puntos_originales,
+                        ancho_imagen=ancho_imagen,
+                        alto_imagen=alto_imagen,
+                    )
+
+                    detecciones.append(
+                        deteccion
+                    )
+
+        finally:
+
+            # ------------------------------------------------
+            # ELIMINAR TEMPORAL
+            # ------------------------------------------------
+
+            try:
+
+                if os.path.exists(
+                    ruta_temporal
+                ):
+
+                    os.remove(
+                        ruta_temporal
+                    )
+
+            except Exception:
+
+                pass
+
+        return detecciones
+
+    # ========================================================
+    # FUSIONAR DETECCIONES KLAR
+    # ========================================================
+
+    def _fusionar_detecciones_klar(
+        self,
+        detecciones_originales,
+        detecciones_reprocesadas
+    ):
+        """
+        Fusiona las detecciones del OCR normal con las
+        detecciones obtenidas mediante el reprocesamiento
+        específico de KLAR.
+
+        El objetivo es:
+
+        - conservar las detecciones originales;
+        - conservar detecciones nuevas encontradas por
+          el segundo OCR;
+        - evitar duplicar textos que representan la misma
+          detección;
+        - no modificar el comportamiento de otros bancos.
+        """
+
+        def normalizar_texto(texto):
+
+            if not texto:
+                return ""
+
+            return " ".join(
+                str(texto)
+                .strip()
+                .lower()
+                .split()
+            )
+
+        def obtener_bbox(deteccion):
+
+            if deteccion is None:
+                return None
+
+            return getattr(
+                deteccion,
+                "bbox",
+                None
+            )
+
+        def obtener_texto(deteccion):
+
+            if deteccion is None:
+                return ""
+
+            return getattr(
+                deteccion,
+                "texto",
+                ""
+            ) or ""
+
+        def centro_bbox(bbox):
+
+            if not bbox:
+                return None
+
+            try:
+
+                xs = [
+                    float(punto[0])
+                    for punto in bbox
+                    if len(punto) >= 2
+                ]
+
+                ys = [
+                    float(punto[1])
+                    for punto in bbox
+                    if len(punto) >= 2
+                ]
+
+                if not xs or not ys:
+                    return None
+
+                return (
+                    (min(xs) + max(xs)) / 2,
+                    (min(ys) + max(ys)) / 2
+                )
+
+            except Exception:
+
+                return None
+
+        def distancia_centros(
+            bbox1,
+            bbox2
+        ):
+
+            centro1 = centro_bbox(
+                bbox1
+            )
+
+            centro2 = centro_bbox(
+                bbox2
+            )
+
+            if (
+                centro1 is None
+                or centro2 is None
+            ):
+
+                return None
+
+            dx = (
+                centro1[0]
+                - centro2[0]
+            )
+
+            dy = (
+                centro1[1]
+                - centro2[1]
+            )
+
+            return (
+                (dx ** 2)
+                + (dy ** 2)
+            ) ** 0.5
+
+        # ----------------------------------------------------
+        # COMENZAR CON EL OCR ORIGINAL
+        # ----------------------------------------------------
+
+        resultado = list(
+            detecciones_originales
+        )
+
+        # ----------------------------------------------------
+        # ANALIZAR DETECCIONES DEL RE-OCR
+        # ----------------------------------------------------
+
+        for nueva in detecciones_reprocesadas:
+
+            texto_nuevo = normalizar_texto(
+                obtener_texto(nueva)
+            )
+
+            if not texto_nuevo:
+
+                continue
+
+            bbox_nuevo = obtener_bbox(
+                nueva
+            )
+
+            duplicada = False
+
+            # ------------------------------------------------
+            # COMPARAR CONTRA LAS YA EXISTENTES
+            # ------------------------------------------------
+
+            for existente in resultado:
+
+                texto_existente = normalizar_texto(
+                    obtener_texto(existente)
+                )
+
+                if not texto_existente:
+
+                    continue
+
+                bbox_existente = obtener_bbox(
+                    existente
+                )
+
+                distancia = distancia_centros(
+                    bbox_nuevo,
+                    bbox_existente
+                )
+
+                # ------------------------------------------------
+                # MISMO TEXTO
+                # ------------------------------------------------
+
+                if texto_nuevo == texto_existente:
+
+                    if (
+                        distancia is None
+                        or distancia <= 80
+                    ):
+
+                        duplicada = True
+
+                        break
+
+                # ------------------------------------------------
+                # UN TEXTO CONTIENE AL OTRO
+                # ------------------------------------------------
+
+                elif (
+                    texto_nuevo in texto_existente
+                    or texto_existente in texto_nuevo
+                ):
+
+                    if (
+                        distancia is None
+                        or distancia <= 80
+                    ):
+
+                        duplicada = True
+
+                        break
+
+            # ------------------------------------------------
+            # SOLO AGREGAR SI ES REALMENTE NUEVA
+            # ------------------------------------------------
+
+            if not duplicada:
+
+                resultado.append(
+                    nueva
+                )
+
+        return resultado
+
+    # ========================================================
+    # PROCESAR IMAGEN ESPECÍFICO KLAR
+    # ========================================================
+
+    def procesar_imagen_klar(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+
+        # ----------------------------------------------------
+        # OCR NORMAL
+        #
+        # NO modificamos procesar_imagen().
+        # ----------------------------------------------------
+
+        resultado_normal = (
+            self.procesar_imagen(
+                ruta_imagen
+            )
+        )
+
+        detecciones_originales = list(
+            resultado_normal.detecciones
+        )
+
+        ancho_imagen = (
+            resultado_normal.ancho_imagen
+        )
+
+        alto_imagen = (
+            resultado_normal.alto_imagen
+        )
+
+        # ----------------------------------------------------
+        # REPROCESAMIENTO EXCLUSIVO KLAR
+        # ----------------------------------------------------
+
+        detecciones_klar = (
+            self._reprocesar_region_klar(
+                ruta_imagen,
+                ancho_imagen,
+                alto_imagen
+            )
+        )
+
+        # ----------------------------------------------------
+        # FUSIONAR SIN DUPLICAR
+        # ----------------------------------------------------
+
+        detecciones = (
+            self._fusionar_detecciones_klar(
+                detecciones_originales,
+                detecciones_klar
+            )
+        )
+
+        # ----------------------------------------------------
+        # ORDENAR
+        # ----------------------------------------------------
+
+        detecciones = (
+            self._ordenar_detecciones(
+                detecciones
+            )
+        )
+
+        # ----------------------------------------------------
+        # RECONSTRUIR LÍNEAS
+        # ----------------------------------------------------
+
+        lineas = (
+            self._reconstruir_lineas(
+                detecciones
+            )
+        )
+
+        texto_completo = "\n".join(
+            lineas
+        )
+
+        return ResultadoOCR(
+            detecciones=detecciones,
+            lineas=lineas,
+            texto_completo=texto_completo,
+            ancho_imagen=ancho_imagen,
+            alto_imagen=alto_imagen,
+        )
 
     # ========================================================
     # OBTENER DATOS

@@ -257,10 +257,9 @@ def procesar_banco(nombre_banco):
             # OCR
             # ------------------------------------------------
             #
-            # IMPORTANTE:
+            # Santander mantiene su procesamiento especial.
             #
-            # Solamente Santander utiliza el
-            # reprocesamiento especial.
+            # Klar utiliza su nuevo procesamiento exclusivo.
             #
             # Los demás bancos continúan exactamente
             # con el procesamiento normal.
@@ -273,6 +272,14 @@ def procesar_banco(nombre_banco):
                     ocr.procesar_imagen(
                         str(archivo),
                         reprocesar_santander=True
+                    )
+                )
+
+            elif nombre_banco == "KLAR":
+
+                resultado = (
+                    ocr.procesar_imagen_klar(
+                        str(archivo)
                     )
                 )
 
@@ -524,6 +531,10 @@ def main():
 
         print(
             "python -m Pruebas.procesar_comprobantes SANTANDER"
+        )
+
+        print(
+            "python -m Pruebas.procesar_comprobantes KLAR"
         )
 
         print()
