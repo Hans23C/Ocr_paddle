@@ -24,7 +24,7 @@ CARPETA_JSON = (
 # COMPROBANTE A PROBAR
 # ============================================================
 
-NOMBRE_ARCHIVO = "image_641.json"
+NOMBRE_ARCHIVO = "image_607.json"
 
 RUTA_JSON = CARPETA_JSON / NOMBRE_ARCHIVO
 
