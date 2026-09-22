@@ -261,6 +261,8 @@ def procesar_banco(nombre_banco):
             #
             # Klar utiliza su nuevo procesamiento exclusivo.
             #
+            # Farmacias del Ahorro utiliza su procesamiento exclusivo.
+            #
             # Los demás bancos continúan exactamente
             # con el procesamiento normal.
             #
@@ -279,6 +281,14 @@ def procesar_banco(nombre_banco):
 
                 resultado = (
                     ocr.procesar_imagen_klar(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_banco == "FARMACIAS_DE_AHORRO":
+
+                resultado = (
+                    ocr.procesar_imagen_farmacias(
                         str(archivo)
                     )
                 )

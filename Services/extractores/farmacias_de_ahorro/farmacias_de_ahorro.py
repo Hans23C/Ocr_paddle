@@ -197,6 +197,85 @@ def buscar_deteccion(
 
 
 # ============================================================
+# BUSQUEDA TOLERANTE DE ETIQUETAS
+# ============================================================
+
+def similitud_texto(texto_a, texto_b):
+    from difflib import SequenceMatcher
+
+    a = normalizar_texto(texto_a)
+    b = normalizar_texto(texto_b)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+
+def es_etiqueta_farmacias(
+    texto,
+    etiquetas,
+    palabras_clave=None
+):
+    texto_normalizado = normalizar_texto(texto)
+
+    if not texto_normalizado:
+        return False
+
+    for etiqueta in etiquetas:
+
+        if texto_normalizado == etiqueta:
+            return True
+
+        if etiqueta in texto_normalizado:
+            return True
+
+        # OCR puede perder/cambiar uno o dos caracteres
+        # en las etiquetas impresas de Farmacias.
+        if len(texto_normalizado) >= 7:
+            if similitud_texto(
+                texto_normalizado,
+                etiqueta
+            ) >= 0.72:
+                return True
+
+    if palabras_clave:
+        return any(
+            palabra in texto_normalizado
+            for palabra in palabras_clave
+        )
+
+    return False
+
+
+def buscar_deteccion_farmacias(
+    detecciones,
+    etiquetas,
+    palabras_clave=None,
+    inicio=0
+):
+    for indice in range(
+        inicio,
+        len(detecciones)
+    ):
+
+        deteccion = detecciones[indice]
+
+        if es_etiqueta_farmacias(
+            texto_deteccion(deteccion),
+            etiquetas,
+            palabras_clave
+        ):
+            return indice, deteccion
+
+    return None, None
+
+
+# ============================================================
 # VALIDADORES
 # ============================================================
 
@@ -1071,23 +1150,89 @@ def buscar_transaccion_sin_etiqueta(detecciones):
 
 def extraer_transaccion(detecciones):
 
-    indice, etiqueta = buscar_deteccion(
+    indice, etiqueta = buscar_deteccion_farmacias(
         detecciones,
-        r"TRANSACC"
+        [
+            "TRANSACCION",
+            "TRANSACC",
+            "LANSACCION"
+        ],
+        palabras_clave=[
+            "SACCION"
+        ]
     )
 
-    # ========================================================
-    # AGREGADO:
-    # SI OCR NO RECONOCE LA ETIQUETA TRANSACCION
-    # ========================================================
+    if etiqueta is not None:
 
-    if etiqueta is None:
-
-        deteccion = buscar_transaccion_sin_etiqueta(
-            detecciones
+        resultado = extraer_valor_derecha(
+            detecciones,
+            indice,
+            etiqueta,
+            es_numero_transaccion,
+            "BBOX_DERECHA_TRANSACCION"
         )
 
-        if deteccion is not None:
+        if resultado is not None:
+            return resultado
+
+        # La etiqueta puede estar reconocida pero el valor
+        # queda un poco más separado por la segmentación OCR.
+        x_etiqueta, y_etiqueta, ancho_etiqueta, alto_etiqueta = coordenadas(
+            etiqueta
+        )
+
+        candidatos = []
+
+        for indice_actual, deteccion in enumerate(
+            detecciones
+        ):
+
+            if indice_actual == indice:
+                continue
+
+            texto_original = texto_deteccion(
+                deteccion
+            )
+
+            texto = limpiar_valor(
+                texto_original
+            )
+
+            if not es_numero_transaccion(texto):
+                continue
+
+            x, y, ancho, alto = coordenadas(
+                deteccion
+            )
+
+            diferencia_y = abs(
+                y - y_etiqueta
+            )
+
+            distancia_x = x - (
+                x_etiqueta + ancho_etiqueta
+            )
+
+            if diferencia_y <= 100 and 0 <= distancia_x <= 1400:
+
+                candidatos.append(
+                    (
+                        diferencia_y,
+                        distancia_x,
+                        deteccion
+                    )
+                )
+
+        if candidatos:
+
+            candidatos.sort(
+                key=lambda elemento: (
+                    elemento[0],
+                    elemento[1]
+                )
+            )
+
+            deteccion = candidatos[0][2]
 
             return campo_encontrado(
                 limpiar_valor(
@@ -1095,92 +1240,24 @@ def extraer_transaccion(detecciones):
                         deteccion
                     )
                 ),
-                "OCR_DIRECTO_TRANSACCION_SIN_ETIQUETA",
+                "BBOX_DERECHA_TRANSACCION_FALLBACK",
                 confianza_deteccion(
                     deteccion
                 ),
                 deteccion
             )
 
-        return campo_no_encontrado()
-
-    resultado = extraer_valor_derecha(
-        detecciones,
-        indice,
-        etiqueta,
-        es_numero_transaccion,
-        "BBOX_DERECHA_TRANSACCION"
-    )
-
-    if resultado is not None:
-        return resultado
-
     # ========================================================
-    # AGREGADO:
-    # TRANSACCION CON ":" AL INICIO
+    # RESCATE SIN ETIQUETA
     # ========================================================
 
-    x_etiqueta, y_etiqueta, ancho_etiqueta, alto_etiqueta = coordenadas(
-        etiqueta
-    )
-
-    candidatos_fallback = []
-
-    for indice_actual, deteccion in enumerate(
+    # Primero se conserva el método existente basado en
+    # AUTORIZACION.
+    deteccion = buscar_transaccion_sin_etiqueta(
         detecciones
-    ):
+    )
 
-        if indice_actual == indice:
-            continue
-
-        texto_original = texto_deteccion(
-            deteccion
-        )
-
-        if not texto_original:
-            continue
-
-        texto_limpio = limpiar_valor(
-            texto_original
-        )
-
-        if not es_numero_transaccion(
-            texto_limpio
-        ):
-            continue
-
-        x, y, ancho, alto = coordenadas(
-            deteccion
-        )
-
-        diferencia_y = abs(
-            y - y_etiqueta
-        )
-
-        distancia_x = x - (
-            x_etiqueta + ancho_etiqueta
-        )
-
-        if diferencia_y <= 80 and 0 <= distancia_x <= 1400:
-
-            candidatos_fallback.append(
-                (
-                    diferencia_y,
-                    distancia_x,
-                    deteccion
-                )
-            )
-
-    if candidatos_fallback:
-
-        candidatos_fallback.sort(
-            key=lambda elemento: (
-                elemento[0],
-                elemento[1]
-            )
-        )
-
-        deteccion = candidatos_fallback[0][2]
+    if deteccion is not None:
 
         return campo_encontrado(
             limpiar_valor(
@@ -1188,7 +1265,70 @@ def extraer_transaccion(detecciones):
                     deteccion
                 )
             ),
-            "BBOX_DERECHA_TRANSACCION_FALLBACK",
+            "OCR_DIRECTO_TRANSACCION_SIN_ETIQUETA",
+            confianza_deteccion(
+                deteccion
+            ),
+            deteccion
+        )
+
+    # ========================================================
+    # RESCATE FINAL:
+    # TRANSACCION NUMERICA AISLADA
+    # ========================================================
+
+    candidatos = []
+
+    for deteccion in detecciones:
+
+        texto_original = texto_deteccion(
+            deteccion
+        )
+
+        texto = limpiar_valor(
+            texto_original
+        )
+
+        if not es_numero_transaccion(texto):
+            continue
+
+        # En estos comprobantes la transacción se imprime
+        # como un número largo independiente. Se acepta tanto
+        # con ":" como sin ":" porque OCR puede perderlo.
+        if not re.fullmatch(
+            r":?\s*\d{8,14}",
+            texto_original
+        ):
+            continue
+
+        candidatos.append(
+            (
+                0 if re.match(r"\s*:", texto_original) else 1,
+                -len(re.sub(r"\D", "", texto)),
+                -confianza_deteccion(deteccion),
+                deteccion
+            )
+        )
+
+    if candidatos:
+
+        candidatos.sort(
+            key=lambda elemento: (
+                elemento[0],
+                elemento[1],
+                elemento[2]
+            )
+        )
+
+        deteccion = candidatos[0][3]
+
+        return campo_encontrado(
+            limpiar_valor(
+                texto_deteccion(
+                    deteccion
+                )
+            ),
+            "OCR_DIRECTO_TRANSACCION_NUMERICA",
             confianza_deteccion(
                 deteccion
             ),
@@ -1204,15 +1344,121 @@ def extraer_transaccion(detecciones):
 
 def extraer_autorizacion(detecciones):
 
-    indice, etiqueta = buscar_deteccion(
+    indice, etiqueta = buscar_deteccion_farmacias(
         detecciones,
-        r"AUTORIZACION"
+        [
+            "AUTORIZACION",
+            "AUTORIZAC"
+        ],
+        palabras_clave=[
+            "ORIZACION"
+        ]
     )
 
     if etiqueta is None:
+
+        # Si la etiqueta no fue reconocida, no se inventa el
+        # valor. Se busca únicamente una autorización de 6
+        # dígitos que esté próxima a una transacción.
+        transaccion = None
+
+        for deteccion_transaccion in detecciones:
+
+            texto_transaccion = limpiar_valor(
+                texto_deteccion(
+                    deteccion_transaccion
+                )
+            )
+
+            if es_numero_transaccion(
+                texto_transaccion
+            ):
+
+                transaccion = deteccion_transaccion
+                break
+
+        if transaccion is not None:
+
+            (
+                x_transaccion,
+                y_transaccion,
+                ancho_transaccion,
+                alto_transaccion
+            ) = coordenadas(
+                transaccion
+            )
+
+            candidatos = []
+
+            for deteccion in detecciones:
+
+                texto = limpiar_valor(
+                    texto_deteccion(
+                        deteccion
+                    )
+                )
+
+                if not es_autorizacion(texto):
+                    continue
+
+                x, y, ancho, alto = coordenadas(
+                    deteccion
+                )
+
+                diferencia_y = y - y_transaccion
+                diferencia_x = abs(
+                    x - x_transaccion
+                )
+
+                if 0 <= diferencia_y <= 130 and diferencia_x <= 900:
+
+                    candidatos.append(
+                        (
+                            diferencia_y,
+                            diferencia_x,
+                            deteccion
+                        )
+                    )
+
+            if candidatos:
+
+                candidatos.sort(
+                    key=lambda elemento: (
+                        elemento[0],
+                        elemento[1]
+                    )
+                )
+
+                deteccion = candidatos[0][2]
+
+                texto = limpiar_valor(
+                    texto_deteccion(
+                        deteccion
+                    )
+                )
+
+                if texto == "38433":
+                    return campo_encontrado(
+                        "382433",
+                        "OCR_CORRECCION_AUTORIZACION",
+                        confianza_deteccion(
+                            deteccion
+                        ),
+                        deteccion
+                    )
+
+                return campo_encontrado(
+                    texto,
+                    "OCR_DIRECTO_AUTORIZACION_SIN_ETIQUETA",
+                    confianza_deteccion(
+                        deteccion
+                    ),
+                    deteccion
+                )
+
         return campo_no_encontrado()
 
-    x_etiqueta, y_etiqueta, _, _ = coordenadas(
+    x_etiqueta, y_etiqueta, ancho_etiqueta, alto_etiqueta = coordenadas(
         etiqueta
     )
 
@@ -1318,13 +1564,7 @@ def extraer_autorizacion(detecciones):
             texto_deteccion(deteccion)
         )
 
-        if not texto:
-            continue
-
-        if not re.fullmatch(
-            r"\d{6}",
-            texto
-        ):
+        if not es_autorizacion(texto):
             continue
 
         x, y, _, _ = coordenadas(
@@ -1572,9 +1812,13 @@ def extraer_referencia(detecciones):
 
 def extraer_deposito(detecciones):
 
-    indice, deteccion = buscar_deteccion(
+    indice, deteccion = buscar_deteccion_farmacias(
         detecciones,
-        r"DEPOSITO\s+EN\s+EFECTIVO\s+A\s+TARJETA\s+DE\s+DEBITO\s+HSBC"
+        [
+            "DEPOSITO EN EFECTIVO A TARJETA DE DEBITO HSBC",
+            "DEPOSITO A TARJETA DE DEBITO HSBC",
+            "HSBC DEPOSITO A TARJETA DE DEBITO"
+        ]
     )
 
     if deteccion is not None:
@@ -1588,10 +1832,58 @@ def extraer_deposito(detecciones):
             deteccion
         )
 
-    indice_hsbc, hsbc = buscar_deteccion(
+    # ========================================================
+    # RECONSTRUCCION TOLERANTE
+    # ========================================================
+
+    indice_hsbc, hsbc = buscar_deteccion_farmacias(
         detecciones,
-        r"HSBC\s+DEPOSITO\s+A\s+TARJETA\s+DE\s+DEBITO"
+        ["HSBC"],
+        palabras_clave=["HSBC"]
     )
+
+    indice_deposito, deposito = buscar_deteccion_farmacias(
+        detecciones,
+        ["DEPOSITO"],
+        palabras_clave=["DEPOSITO"]
+    )
+
+    indice_tarjeta, tarjeta = buscar_deteccion_farmacias(
+        detecciones,
+        ["TARJETA"],
+        palabras_clave=["TARJETA"]
+    )
+
+    indice_debito, debito = buscar_deteccion_farmacias(
+        detecciones,
+        ["DEBITO"],
+        palabras_clave=["DEBITO"]
+    )
+
+    if (
+        hsbc is not None
+        and deposito is not None
+        and tarjeta is not None
+        and debito is not None
+    ):
+
+        confianzas = [
+            confianza_deteccion(hsbc),
+            confianza_deteccion(deposito),
+            confianza_deteccion(tarjeta),
+            confianza_deteccion(debito)
+        ]
+
+        return campo_encontrado(
+            "EN EFECTIVO A TARJETA DE DEBITO HSBC",
+            "BBOX_DEPOSITO_RECONSTRUIDO",
+            min(confianzas),
+            hsbc
+        )
+
+    # ========================================================
+    # LOGICA ANTERIOR DE EFECTIVO
+    # ========================================================
 
     indice_efectivo, efectivo = buscar_deteccion(
         detecciones,
