@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List
 import os
+import re
 
 from PIL import Image
 
@@ -1092,6 +1093,1090 @@ class PaddleOCRServicio:
             ancho_imagen=ancho_imagen,
             alto_imagen=alto_imagen,
         )
+
+
+
+    # ========================================================
+    # FARMACIAS DEL AHORRO - PROCESAMIENTO ESPECIFICO
+    # ========================================================
+
+    def procesar_imagen_farmacias(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        """
+        Procesamiento EXCLUSIVO de FARMACIAS DEL AHORRO.
+
+        IMPORTANTE:
+        - No modifica procesar_imagen().
+        - No modifica las configuraciones de otros bancos.
+        - El OCR normal se ejecuta una sola vez.
+        - El reproceso Farmacias reutiliza self.ocr.
+        - El reproceso se limita al campo que realmente falta.
+        - No se inventan valores.
+        """
+
+        import time
+
+        inicio = time.perf_counter()
+
+        resultado_normal = self.procesar_imagen(
+            ruta_imagen
+        )
+
+        detecciones_originales = list(
+            resultado_normal.detecciones
+        )
+
+        print(
+            "[FARMACIAS] OCR normal: "
+            f"{time.perf_counter() - inicio:.3f}s"
+        )
+
+        campos_faltantes = (
+            self._farmacias_campos_faltantes(
+                detecciones_originales
+            )
+        )
+
+        if not campos_faltantes:
+
+            print(
+                "[FARMACIAS] Reproceso: OMITIDO | "
+                "campos críticos completos"
+            )
+
+            print(
+                "[FARMACIAS] Tiempo total: "
+                f"{time.perf_counter() - inicio:.3f}s"
+            )
+
+            return resultado_normal
+
+        print(
+            "[FARMACIAS] Campos que requieren revisión: "
+            + ", ".join(campos_faltantes)
+        )
+
+        inicio_reproceso = time.perf_counter()
+
+        try:
+
+            detecciones_reprocesadas = (
+                self._reprocesar_farmacias_ahorro(
+                    ruta_imagen,
+                    resultado_normal.ancho_imagen,
+                    resultado_normal.alto_imagen,
+                    campos_faltantes,
+                    detecciones_originales
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "[FARMACIAS] Reproceso fallido. "
+                "Se conserva OCR normal: "
+                f"{type(error).__name__}: {error}"
+            )
+
+            return resultado_normal
+
+        tiempo_reproceso = (
+            time.perf_counter()
+            - inicio_reproceso
+        )
+
+        if not detecciones_reprocesadas:
+
+            print(
+                "[FARMACIAS] Reproceso: "
+                f"{tiempo_reproceso:.3f}s | "
+                "sin detecciones nuevas"
+            )
+
+            return resultado_normal
+
+        detecciones = (
+            self._fusionar_detecciones_farmacias(
+                detecciones_originales,
+                detecciones_reprocesadas
+            )
+        )
+
+        detecciones = self._ordenar_detecciones(
+            detecciones
+        )
+
+        lineas = self._reconstruir_lineas(
+            detecciones
+        )
+
+        texto_completo = "\n".join(
+            lineas
+        )
+
+        print(
+            "[FARMACIAS] Reproceso: "
+            f"{tiempo_reproceso:.3f}s | "
+            f"detecciones nuevas: {len(detecciones_reprocesadas)} | "
+            f"Total: {time.perf_counter() - inicio:.3f}s"
+        )
+
+        return ResultadoOCR(
+            detecciones=detecciones,
+            lineas=lineas,
+            texto_completo=texto_completo,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen
+        )
+
+    # ========================================================
+    # UTILIDADES FARMACIAS
+    # ========================================================
+
+    def _farmacias_texto(
+        self,
+        deteccion
+    ):
+        return " ".join(
+            str(
+                getattr(
+                    deteccion,
+                    "texto",
+                    ""
+                ) or ""
+            ).strip().upper().split()
+        )
+
+    def _farmacias_rect(
+        self,
+        deteccion
+    ):
+        try:
+
+            bbox = getattr(
+                deteccion,
+                "bbox",
+                None
+            )
+
+            if not bbox:
+                return None
+
+            xs = [
+                float(p[0])
+                for p in bbox
+                if len(p) >= 2
+            ]
+
+            ys = [
+                float(p[1])
+                for p in bbox
+                if len(p) >= 2
+            ]
+
+            if not xs or not ys:
+                return None
+
+            return (
+                min(xs),
+                min(ys),
+                max(xs),
+                max(ys)
+            )
+
+        except Exception:
+
+            return None
+
+    def _farmacias_numero(
+        self,
+        texto,
+        longitud_minima=1,
+        longitud_maxima=30
+    ):
+        import re
+
+        numeros = re.findall(
+            r"\d+",
+            texto
+        )
+
+        return any(
+            longitud_minima <= len(numero) <= longitud_maxima
+            for numero in numeros
+        )
+
+    def _farmacias_valor_derecha(
+        self,
+        detecciones,
+        etiqueta,
+        validador,
+        tolerancia_y=75,
+        distancia_maxima=1400
+    ):
+        rect_etiqueta = self._farmacias_rect(
+            etiqueta
+        )
+
+        if rect_etiqueta is None:
+            return False
+
+        centro_y = (
+            rect_etiqueta[1]
+            + rect_etiqueta[3]
+        ) / 2.0
+
+        derecha = rect_etiqueta[2]
+
+        for candidata in detecciones:
+
+            if candidata is etiqueta:
+                continue
+
+            rect_candidata = self._farmacias_rect(
+                candidata
+            )
+
+            if rect_candidata is None:
+                continue
+
+            texto = self._farmacias_texto(
+                candidata
+            )
+
+            if not validador(texto):
+                continue
+
+            centro_y_candidata = (
+                rect_candidata[1]
+                + rect_candidata[3]
+            ) / 2.0
+
+            diferencia_y = abs(
+                centro_y_candidata
+                - centro_y
+            )
+
+            distancia_x = (
+                rect_candidata[0]
+                - derecha
+            )
+
+            if (
+                diferencia_y <= tolerancia_y
+                and distancia_x >= -40
+                and distancia_x <= distancia_maxima
+            ):
+                return True
+
+        return False
+
+    def _farmacias_tiene_monto(
+        self,
+        detecciones
+    ):
+        """
+        No considera cualquier importe del ticket como MONTO.
+
+        Prioridad:
+        1. MONTO + valor a la derecha.
+        2. HSBC DEPOSITO... + importe cercano.
+        """
+
+        import re
+
+        for etiqueta in detecciones:
+
+            texto = self._farmacias_texto(
+                etiqueta
+            )
+
+            if "MONTO" not in texto:
+                continue
+
+            if self._farmacias_valor_derecha(
+                detecciones,
+                etiqueta,
+                lambda valor: bool(
+                    re.search(
+                        r"\$?\s*\d+(?:[.,]\d{1,2})?",
+                        valor
+                    )
+                ),
+                tolerancia_y=85,
+                distancia_maxima=1600
+            ):
+                return True
+
+        for bloque in detecciones:
+
+            texto_bloque = self._farmacias_texto(
+                bloque
+            )
+
+            if not (
+                "HSBC" in texto_bloque
+                and "DEPOSITO" in texto_bloque
+                and "TARJETA" in texto_bloque
+            ):
+                continue
+
+            rect_bloque = self._farmacias_rect(
+                bloque
+            )
+
+            if rect_bloque is None:
+                continue
+
+            y_bloque = (
+                rect_bloque[1]
+                + rect_bloque[3]
+            ) / 2.0
+
+            for candidata in detecciones:
+
+                if candidata is bloque:
+                    continue
+
+                texto = self._farmacias_texto(
+                    candidata
+                )
+
+                if not re.search(
+                    r"\$?\s*\d+(?:[.,]\d{2})",
+                    texto
+                ):
+                    continue
+
+                rect_candidata = self._farmacias_rect(
+                    candidata
+                )
+
+                if rect_candidata is None:
+                    continue
+
+                y_candidata = (
+                    rect_candidata[1]
+                    + rect_candidata[3]
+                ) / 2.0
+
+                distancia_x = (
+                    rect_candidata[0]
+                    - rect_bloque[2]
+                )
+
+                if (
+                    abs(y_candidata - y_bloque) <= 90
+                    and -50 <= distancia_x <= 2500
+                ):
+                    return True
+
+        return False
+
+    def _farmacias_campos_faltantes(
+        self,
+        detecciones
+    ):
+        """
+        Determina exactamente qué campo crítico necesita
+        reprocesamiento.
+
+        Esta función es EXCLUSIVA de Farmacias.
+        """
+
+        import re
+
+        tiene_transaccion = False
+        tiene_autorizacion = False
+        tiene_referencia = False
+        tiene_deposito = False
+        tiene_monto = self._farmacias_tiene_monto(
+            detecciones
+        )
+
+        # ----------------------------------------------------
+        # TRANSACCION
+        # ----------------------------------------------------
+
+        for etiqueta in detecciones:
+
+            texto = self._farmacias_texto(
+                etiqueta
+            )
+
+            if "TRANSACC" not in texto:
+                continue
+
+            if self._farmacias_valor_derecha(
+                detecciones,
+                etiqueta,
+                lambda valor: self._farmacias_numero(
+                    valor,
+                    10,
+                    10
+                ),
+                tolerancia_y=85,
+                distancia_maxima=1600
+            ):
+                tiene_transaccion = True
+                break
+
+        # ----------------------------------------------------
+        # AUTORIZACION
+        # ----------------------------------------------------
+
+        for etiqueta in detecciones:
+
+            texto = self._farmacias_texto(
+                etiqueta
+            )
+
+            if "AUTORIZ" not in texto:
+                continue
+
+            if self._farmacias_valor_derecha(
+                detecciones,
+                etiqueta,
+                lambda valor: self._farmacias_numero(
+                    valor,
+                    6,
+                    6
+                ),
+                tolerancia_y=85,
+                distancia_maxima=1600
+            ):
+                tiene_autorizacion = True
+                break
+
+        # ----------------------------------------------------
+        # REFERENCIA
+        # ----------------------------------------------------
+
+        for deteccion in detecciones:
+
+            texto = self._farmacias_texto(
+                deteccion
+            )
+
+            if re.search(
+                r"2278\s*$",
+                texto
+            ):
+                tiene_referencia = True
+                break
+
+        # ----------------------------------------------------
+        # DEPOSITO
+        # ----------------------------------------------------
+
+        textos = [
+            self._farmacias_texto(
+                deteccion
+            )
+            for deteccion in detecciones
+        ]
+
+        texto_global = " ".join(
+            textos
+        )
+
+        if (
+            "DEPOSITO" in texto_global
+            and "HSBC" in texto_global
+        ):
+            tiene_deposito = True
+
+        faltantes = []
+
+        if not tiene_transaccion:
+            faltantes.append("transaccion")
+
+        if not tiene_autorizacion:
+            faltantes.append("autorizacion")
+
+        if not tiene_referencia:
+            faltantes.append("referencia")
+
+        if not tiene_deposito:
+            faltantes.append("deposito")
+
+        if not tiene_monto:
+            faltantes.append("monto")
+
+        return faltantes
+
+    # ========================================================
+    # REPROCESAMIENTO FARMACIAS
+    # ========================================================
+
+    def _reprocesar_farmacias_ahorro(
+        self,
+        ruta_imagen,
+        ancho_imagen,
+        alto_imagen,
+        campos_faltantes=None,
+        detecciones_originales=None
+    ):
+        """
+        OCR regional EXCLUSIVO de Farmacias.
+
+        CAMBIO IMPORTANTE:
+        Ya no procesa 45%-86% de la imagen completa.
+
+        Cuando falta TRANSACCION se procesa solamente la franja
+        donde está TRANSACCION, usando AUTORIZACION como ancla
+        si la etiqueta TRANSACCION no fue reconocida.
+
+        Para otros campos faltantes se utiliza únicamente el bloque
+        crítico de datos bancarios.
+
+        Se reutiliza self.ocr, por lo que NO se crea un segundo
+        modelo PaddleOCR.
+        """
+
+        import cv2
+        import numpy as np
+
+        if detecciones_originales is None:
+            detecciones_originales = []
+
+        if campos_faltantes is None:
+            campos_faltantes = [
+                "transaccion",
+                "autorizacion",
+                "referencia",
+                "deposito",
+                "monto"
+            ]
+
+        imagen = cv2.imread(
+            ruta_imagen,
+            cv2.IMREAD_COLOR
+        )
+
+        if imagen is None:
+            return []
+
+        altura, ancho = imagen.shape[:2]
+
+        # ----------------------------------------------------
+        # DETERMINAR REGION CRITICA
+        # ----------------------------------------------------
+
+        x_inicio = 0
+        x_fin = ancho
+
+        y_inicio = None
+        y_fin = None
+
+        # Primero buscamos TRANSACCION.
+        deteccion_transaccion = None
+
+        for deteccion in detecciones_originales:
+
+            texto = self._farmacias_texto(
+                deteccion
+            )
+
+            if "TRANSACC" in texto:
+
+                deteccion_transaccion = (
+                    deteccion
+                )
+
+                break
+
+        # Si no existe TRANSACCION, AUTORIZACION sirve como ancla.
+        deteccion_autorizacion = None
+
+        for deteccion in detecciones_originales:
+
+            texto = self._farmacias_texto(
+                deteccion
+            )
+
+            if "AUTORIZ" in texto:
+
+                deteccion_autorizacion = (
+                    deteccion
+                )
+
+                break
+
+        # ----------------------------------------------------
+        # CASO 1: SOLO TRANSACCION FALTA
+        # ----------------------------------------------------
+
+        if (
+            campos_faltantes == ["transaccion"]
+            or (
+                "transaccion" in campos_faltantes
+                and len(campos_faltantes) == 1
+            )
+        ):
+
+            if deteccion_transaccion is not None:
+
+                rect = self._farmacias_rect(
+                    deteccion_transaccion
+                )
+
+                if rect is not None:
+
+                    y_inicio = int(
+                        rect[1] - max(
+                            35,
+                            (rect[3] - rect[1]) * 1.8
+                        )
+                    )
+
+                    y_fin = int(
+                        rect[3]
+                        + max(
+                            85,
+                            (rect[3] - rect[1]) * 2.8
+                        )
+                    )
+
+            elif deteccion_autorizacion is not None:
+
+                rect = self._farmacias_rect(
+                    deteccion_autorizacion
+                )
+
+                if rect is not None:
+
+                    alto_linea = max(
+                        25,
+                        rect[3] - rect[1]
+                    )
+
+                    y_inicio = int(
+                        rect[1]
+                        - alto_linea * 4.5
+                    )
+
+                    y_fin = int(
+                        rect[1]
+                        - alto_linea * 0.5
+                    )
+
+            else:
+
+                # Último recurso: zona inferior aproximada.
+                y_inicio = int(
+                    altura * 0.62
+                )
+
+                y_fin = int(
+                    altura * 0.74
+                )
+
+        else:
+
+            # ------------------------------------------------
+            # CASO 2: UNO O VARIOS CAMPOS CRITICOS
+            # ------------------------------------------------
+
+            anclas = []
+
+            for deteccion in detecciones_originales:
+
+                texto = self._farmacias_texto(
+                    deteccion
+                )
+
+                if any(
+                    palabra in texto
+                    for palabra in (
+                        "TRANSACC",
+                        "AUTORIZ",
+                        "REFERENCIA",
+                        "DEPOSITO",
+                        "MONTO",
+                        "EFECTIVO"
+                    )
+                ):
+
+                    rect = self._farmacias_rect(
+                        deteccion
+                    )
+
+                    if rect is not None:
+                        anclas.append(rect)
+
+            if anclas:
+
+                y_inicio = int(
+                    min(
+                        rect[1]
+                        for rect in anclas
+                    )
+                    - 45
+                )
+
+                y_fin = int(
+                    max(
+                        rect[3]
+                        for rect in anclas
+                    )
+                    + 100
+                )
+
+            else:
+
+                y_inicio = int(
+                    altura * 0.58
+                )
+
+                y_fin = int(
+                    altura * 0.82
+                )
+
+        y_inicio = max(
+            0,
+            min(
+                y_inicio if y_inicio is not None else 0,
+                altura - 1
+            )
+        )
+
+        y_fin = max(
+            y_inicio + 1,
+            min(
+                y_fin if y_fin is not None else altura,
+                altura
+            )
+        )
+
+        recorte = imagen[
+            y_inicio:y_fin,
+            x_inicio:x_fin
+        ]
+
+        if recorte.size == 0:
+            return []
+
+        print(
+            "[FARMACIAS] Región OCR: "
+            f"x={x_inicio}:{x_fin} "
+            f"y={y_inicio}:{y_fin} "
+            f"campos={','.join(campos_faltantes)}"
+        )
+
+        # ----------------------------------------------------
+        # PREPROCESAMIENTO ESPECIFICO
+        # ----------------------------------------------------
+
+        gris = cv2.cvtColor(
+            recorte,
+            cv2.COLOR_BGR2GRAY
+        )
+
+        clahe = cv2.createCLAHE(
+            clipLimit=2.0,
+            tileGridSize=(8, 8)
+        )
+
+        mejorada = clahe.apply(
+            gris
+        )
+
+        # Un poco de suavizado para ruido de fotografía.
+        mejorada = cv2.GaussianBlur(
+            mejorada,
+            (3, 3),
+            0
+        )
+
+        # ----------------------------------------------------
+        # ESCALA
+        # ----------------------------------------------------
+
+        factor = 3.0
+
+        max_lado = max(
+            mejorada.shape[1],
+            mejorada.shape[0]
+        )
+
+        if max_lado * factor > 3200:
+
+            factor = (
+                3200
+                / max_lado
+            )
+
+        factor = max(
+            1.5,
+            factor
+        )
+
+        nuevo_ancho = max(
+            1,
+            int(
+                mejorada.shape[1]
+                * factor
+            )
+        )
+
+        nuevo_alto = max(
+            1,
+            int(
+                mejorada.shape[0]
+                * factor
+            )
+        )
+
+        procesada = cv2.resize(
+            mejorada,
+            (
+                nuevo_ancho,
+                nuevo_alto
+            ),
+            interpolation=cv2.INTER_CUBIC
+        )
+
+        ruta_temporal = (
+            ruta_imagen
+            + ".farmacias_regional.png"
+        )
+
+        detecciones = []
+
+        try:
+
+            guardada = cv2.imwrite(
+                ruta_temporal,
+                procesada,
+                [
+                    cv2.IMWRITE_PNG_COMPRESSION,
+                    1
+                ]
+            )
+
+            if not guardada:
+                return []
+
+            # ------------------------------------------------
+            # REUTILIZAR EL MISMO MODELO OCR
+            # ------------------------------------------------
+
+            resultado = self.ocr.predict(
+                ruta_temporal
+            )
+
+            for pagina in resultado:
+
+                datos = self._obtener_datos(
+                    pagina
+                )
+
+                if datos is None:
+                    continue
+
+                textos = datos["textos"]
+                scores = datos["scores"]
+                cajas = datos["cajas"]
+
+                for texto, score, bbox in zip(
+                    textos,
+                    scores,
+                    cajas
+                ):
+
+                    texto = str(
+                        texto
+                    ).strip()
+
+                    if not texto:
+                        continue
+
+                    puntos = []
+
+                    for punto in bbox:
+
+                        x = (
+                            float(punto[0])
+                            / factor
+                            + x_inicio
+                        )
+
+                        y = (
+                            float(punto[1])
+                            / factor
+                            + y_inicio
+                        )
+
+                        puntos.append(
+                            [
+                                x,
+                                y
+                            ]
+                        )
+
+                    if not puntos:
+                        continue
+
+                    detecciones.append(
+                        self._crear_deteccion(
+                            texto=texto,
+                            confianza=float(score),
+                            bbox=puntos,
+                            ancho_imagen=ancho_imagen,
+                            alto_imagen=alto_imagen
+                        )
+                    )
+
+        except Exception as error:
+
+            print(
+                "[FARMACIAS] Error OCR regional: "
+                f"{type(error).__name__}: {error}"
+            )
+
+        finally:
+
+            try:
+
+                if os.path.exists(
+                    ruta_temporal
+                ):
+                    os.remove(
+                        ruta_temporal
+                    )
+
+            except Exception:
+                pass
+
+        return detecciones
+
+    # ========================================================
+    # FUSIONAR DETECCIONES FARMACIAS
+    # ========================================================
+
+    def _fusionar_detecciones_farmacias(
+        self,
+        detecciones_originales,
+        detecciones_reprocesadas
+    ):
+        """
+        Fusion EXCLUSIVA de Farmacias.
+
+        No reemplaza automáticamente una detección original.
+        Agrega información nueva para que el extractor pueda
+        seleccionar el valor correcto.
+        """
+
+        resultado = list(
+            detecciones_originales
+        )
+
+        def texto(deteccion):
+
+            return " ".join(
+                str(
+                    getattr(
+                        deteccion,
+                        "texto",
+                        ""
+                    ) or ""
+                )
+                .strip()
+                .upper()
+                .split()
+            )
+
+        def centro(deteccion):
+
+            rect = self._farmacias_rect(
+                deteccion
+            )
+
+            if rect is None:
+                return None
+
+            return (
+                (
+                    rect[0]
+                    + rect[2]
+                ) / 2.0,
+                (
+                    rect[1]
+                    + rect[3]
+                ) / 2.0
+            )
+
+        for nueva in detecciones_reprocesadas:
+
+            texto_nuevo = texto(
+                nueva
+            )
+
+            if not texto_nuevo:
+                continue
+
+            centro_nuevo = centro(
+                nueva
+            )
+
+            duplicada = False
+
+            for existente in resultado:
+
+                if texto_nuevo != texto(
+                    existente
+                ):
+                    continue
+
+                centro_existente = centro(
+                    existente
+                )
+
+                if (
+                    centro_nuevo is None
+                    or centro_existente is None
+                ):
+
+                    duplicada = True
+                    break
+
+                distancia = (
+                    (
+                        centro_nuevo[0]
+                        - centro_existente[0]
+                    ) ** 2
+                    +
+                    (
+                        centro_nuevo[1]
+                        - centro_existente[1]
+                    ) ** 2
+                ) ** 0.5
+
+                if distancia <= 80:
+
+                    duplicada = True
+                    break
+
+            if not duplicada:
+
+                resultado.append(
+                    nueva
+                )
+
+        return resultado
+
+    # ========================================================
+    # ESTIMAR INCLINACION FARMACIAS
+    # ========================================================
+
+    def _farmacias_estimar_inclinacion(
+        self,
+        imagen
+    ):
+        return 0.0
 
     # ========================================================
     # OBTENER DATOS

@@ -27,7 +27,7 @@ CARPETA_JSON = (
 
 ARCHIVO_JSON = (
     CARPETA_JSON
-    / "image_736.json"
+    / "image_694.json"
 )
 
 

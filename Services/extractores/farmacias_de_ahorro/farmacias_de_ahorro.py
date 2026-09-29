@@ -500,6 +500,301 @@ def normalizar_monto(texto):
 def extraer_monto(detecciones):
 
     # ========================================================
+    # CONSENSO ESTRUCTURAL DEL MONTO - FARMACIAS
+    # ========================================================
+    #
+    # Esta capa se agrega antes de la logica existente.
+    # No reemplaza las estrategias anteriores: solamente actua
+    # cuando el mismo monto aparece respaldado por DOS zonas
+    # independientes del comprobante:
+    #
+    #   1) bloque superior de deposito HSBC
+    #   2) valor asociado a la etiqueta MONTO
+    #
+    # Esto permite resolver casos como:
+    #
+    #   $400.00  +  MONTO :400  +  MONTO :440
+    #
+    # y:
+    #
+    #   $300.00  +  MONTO :300  +  $3000.00
+    #
+    # sin inventar ningun valor. El valor elegido siempre debe
+    # existir literalmente entre las detecciones OCR.
+    #
+    # Si no existe consenso suficiente, se conserva EXACTAMENTE
+    # la logica anterior de esta funcion.
+    # ========================================================
+
+    indice_bloque_consenso, bloque_consenso = buscar_deteccion(
+        detecciones,
+        r"HSBC\s+DEPOSITO\s+A\s+TARJETA\s+DE\s+DEBITO"
+    )
+
+    if bloque_consenso is not None:
+
+        (
+            x_bloque,
+            y_bloque,
+            ancho_bloque,
+            alto_bloque
+        ) = coordenadas(bloque_consenso)
+
+        # ----------------------------------------------------
+        # Candidatos de monto relacionados con el bloque HSBC.
+        # Se conservan las mismas ventanas espaciales que ya
+        # utiliza la logica original.
+        # ----------------------------------------------------
+
+        candidatos_bloque = []
+
+        for indice, deteccion in enumerate(detecciones):
+
+            if indice == indice_bloque_consenso:
+                continue
+
+            texto = limpiar_valor(
+                texto_deteccion(deteccion)
+            )
+
+            if not es_monto(texto):
+                continue
+
+            (
+                x,
+                y,
+                ancho,
+                alto
+            ) = coordenadas(deteccion)
+
+            distancia_x = x - (
+                x_bloque + ancho_bloque
+            )
+
+            # Zona superior: misma condicion que la funcion
+            # original.
+            if (
+                -20 <= distancia_x <= 400
+                and y <= y_bloque + 15
+            ):
+                candidatos_bloque.append(
+                    (
+                        0,
+                        abs(y - y_bloque),
+                        max(distancia_x, 0),
+                        deteccion
+                    )
+                )
+                continue
+
+            # Mismo bloque.
+            if (
+                -30 <= distancia_x <= 400
+                and y_bloque <= y <= y_bloque + alto_bloque + 10
+            ):
+                candidatos_bloque.append(
+                    (
+                        1,
+                        y - y_bloque,
+                        max(distancia_x, 0),
+                        deteccion
+                    )
+                )
+                continue
+
+            # Debajo del bloque.
+            diferencia_y_inferior = y - (
+                y_bloque + alto_bloque
+            )
+
+            if (
+                -30 <= distancia_x <= 400
+                and -15 <= diferencia_y_inferior <= 80
+            ):
+                candidatos_bloque.append(
+                    (
+                        2,
+                        diferencia_y_inferior,
+                        max(distancia_x, 0),
+                        deteccion
+                    )
+                )
+                continue
+
+            # Derecha lejana.
+            diferencia_y_lejana = abs(
+                y - y_bloque
+            )
+
+            if (
+                400 <= distancia_x <= 2300
+                and diferencia_y_lejana <= 80
+            ):
+                candidatos_bloque.append(
+                    (
+                        3,
+                        diferencia_y_lejana,
+                        distancia_x,
+                        deteccion
+                    )
+                )
+
+        # ----------------------------------------------------
+        # Candidatos asociados a MONTO.
+        # ----------------------------------------------------
+
+        indice_monto_consenso, etiqueta_monto_consenso = buscar_deteccion(
+            detecciones,
+            r"MONTO"
+        )
+
+        candidatos_etiqueta = []
+
+        if etiqueta_monto_consenso is not None:
+
+            x_etiqueta, y_etiqueta, _, _ = coordenadas(
+                etiqueta_monto_consenso
+            )
+
+            for indice, deteccion in enumerate(detecciones):
+
+                if indice == indice_monto_consenso:
+                    continue
+
+                texto = limpiar_valor(
+                    texto_deteccion(deteccion)
+                )
+
+                if not es_monto(texto):
+                    continue
+
+                x, y, _, _ = coordenadas(deteccion)
+
+                diferencia_y = abs(
+                    y - y_etiqueta
+                )
+
+                diferencia_x = x - x_etiqueta
+
+                if (
+                    diferencia_y <= 65
+                    and diferencia_x >= 0
+                ):
+                    candidatos_etiqueta.append(
+                        (
+                            diferencia_y,
+                            diferencia_x,
+                            deteccion
+                        )
+                    )
+
+        # ----------------------------------------------------
+        # Buscar un valor que aparezca en ambas evidencias.
+        # ----------------------------------------------------
+
+        if candidatos_bloque and candidatos_etiqueta:
+
+            valores_bloque = {}
+            valores_etiqueta = {}
+
+            for prioridad, diferencia_y, diferencia_x, deteccion in candidatos_bloque:
+                valor_normalizado = normalizar_monto(
+                    texto_deteccion(deteccion)
+                )
+
+                if not valor_normalizado:
+                    continue
+
+                valores_bloque.setdefault(
+                    valor_normalizado,
+                    []
+                ).append(
+                    (
+                        prioridad,
+                        diferencia_y,
+                        diferencia_x,
+                        deteccion
+                    )
+                )
+
+            for diferencia_y, diferencia_x, deteccion in candidatos_etiqueta:
+                valor_normalizado = normalizar_monto(
+                    texto_deteccion(deteccion)
+                )
+
+                if not valor_normalizado:
+                    continue
+
+                valores_etiqueta.setdefault(
+                    valor_normalizado,
+                    []
+                ).append(
+                    (
+                        diferencia_y,
+                        diferencia_x,
+                        deteccion
+                    )
+                )
+
+            valores_comunes = set(valores_bloque).intersection(
+                valores_etiqueta
+            )
+
+            if valores_comunes:
+
+                candidatos_consenso = []
+
+                for valor in valores_comunes:
+
+                    for (
+                        prioridad_bloque,
+                        diferencia_y_bloque,
+                        diferencia_x_bloque,
+                        deteccion_bloque
+                    ) in valores_bloque[valor]:
+
+                        for (
+                            diferencia_y_etiqueta,
+                            diferencia_x_etiqueta,
+                            deteccion_etiqueta
+                        ) in valores_etiqueta[valor]:
+
+                            # Se prioriza la posicion estructural del
+                            # monto en el bloque y despues la confianza.
+                            puntuacion = (
+                                prioridad_bloque,
+                                diferencia_y_bloque,
+                                diferencia_x_bloque,
+                                -confianza_deteccion(deteccion_bloque),
+                                diferencia_y_etiqueta,
+                                diferencia_x_etiqueta
+                            )
+
+                            candidatos_consenso.append(
+                                (
+                                    puntuacion,
+                                    deteccion_bloque
+                                )
+                            )
+
+                if candidatos_consenso:
+
+                    candidatos_consenso.sort(
+                        key=lambda elemento: elemento[0]
+                    )
+
+                    deteccion = candidatos_consenso[0][1]
+
+                    return campo_encontrado(
+                        normalizar_monto(
+                            texto_deteccion(deteccion)
+                        ),
+                        "BBOX_MONTO_CONSENSO_FARMACIAS",
+                        confianza_deteccion(deteccion),
+                        deteccion
+                    )
+
+    # ========================================================
     # BLOQUE SUPERIOR DE DEPOSITO
     # ========================================================
 
