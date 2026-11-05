@@ -801,7 +801,18 @@ def extraer_referencia(
 # DESTINATARIO - TRASPASO SPEI
 # ============================================================
 
-def extraer_destinatario(
+def extraer_destinatario(detecciones):
+    etiqueta = buscar_texto(detecciones, "Destinatario")
+    if not etiqueta:
+        for d_banco in detecciones:
+            if normalizar(texto(d_banco)).startswith("banco "):
+                cand_arr = valor_arriba(detecciones, d_banco, max_dy=0.06)
+                if cand_arr and texto(cand_arr) and not normalizar(texto(cand_arr)).startswith("banco"):
+                    return crear_campo(texto(cand_arr), cand_arr, "BBOX_ARRIBA")
+        return crear_campo("", None)
+    return _extraer_destinatario_base(detecciones)
+
+def _extraer_destinatario_base(
     detecciones
 ):
 
@@ -1697,7 +1708,15 @@ def extraer_concepto_transferencia(
 # TRASPASO SPEI
 # ============================================================
 
-def extraer_traspaso_spei(
+def extraer_traspaso_spei(detecciones):
+    campos = _extraer_traspaso_spei_base(detecciones)
+    if campos.get("concepto", {}).get("valor") is None:
+        campos.pop("concepto", None)
+    if campos.get("referencia_numerica", {}).get("valor") is None:
+        campos.pop("referencia_numerica", None)
+    return campos
+
+def _extraer_traspaso_spei_base(
     detecciones
 ):
 

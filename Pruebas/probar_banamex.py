@@ -259,6 +259,14 @@ CAMPOS_ESPERADOS = {
         "clave_rastreo",
     ],
 
+    "image_401.json": [
+        "fecha",
+        "monto",
+        "cuenta_origen",
+        "cuenta_destino",
+        "clave_rastreo",
+    ],
+
     # --------------------------------------------------------
     # BANCA NET
     # --------------------------------------------------------

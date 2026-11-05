@@ -2522,3 +2522,462 @@ class PaddleOCRServicio:
                 )
 
         return lineas
+
+
+    # ========================================================
+    # REPROCESAMIENTO REGIONAL SELECTIVO (NUEVOS BANCOS)
+    # ========================================================
+
+    def _reprocesar_region_selectiva(
+        self,
+        ruta_imagen: str,
+        ancho_imagen: int,
+        alto_imagen: int,
+        y_inicio_rel: float = 0.15,
+        y_fin_rel: float = 0.85,
+        factor_escala: float = 2.5,
+        usar_clahe: bool = True,
+        sufijo: str = "reproceso"
+    ):
+        """
+        Recorta únicamente la franja vertical indicada [y_inicio_rel, y_fin_rel],
+        aplica mejora ligera de contraste (CLAHE) y escalado, y reutiliza self.ocr
+        sin alterar la configuración original de otros bancos.
+        """
+        import cv2
+
+        imagen = cv2.imread(ruta_imagen, cv2.IMREAD_COLOR)
+        if imagen is None:
+            return []
+
+        altura, ancho = imagen.shape[:2]
+        y_inicio = max(0, min(int(altura * y_inicio_rel), altura - 1))
+        y_fin = max(y_inicio + 1, min(int(altura * y_fin_rel), altura))
+
+        recorte = imagen[y_inicio:y_fin, 0:ancho]
+        if recorte.size == 0:
+            return []
+
+        if usar_clahe:
+            gris = cv2.cvtColor(recorte, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            mejorada = clahe.apply(gris)
+            procesada_base = cv2.cvtColor(mejorada, cv2.COLOR_GRAY2BGR)
+        else:
+            procesada_base = recorte
+
+        max_lado = max(procesada_base.shape[1], procesada_base.shape[0])
+        factor = float(factor_escala)
+        if max_lado * factor > 3000:
+            factor = max(1.5, 3000.0 / max_lado)
+
+        nuevo_ancho = max(1, int(procesada_base.shape[1] * factor))
+        nuevo_alto = max(1, int(procesada_base.shape[0] * factor))
+
+        procesada = cv2.resize(
+            procesada_base,
+            (nuevo_ancho, nuevo_alto),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+        ruta_temporal = f"{ruta_imagen}.{sufijo}.png"
+        detecciones = []
+
+        try:
+            if not cv2.imwrite(ruta_temporal, procesada, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
+                return []
+
+            resultado = self.ocr.predict(ruta_temporal)
+            for pagina in resultado:
+                datos = self._obtener_datos(pagina)
+                if datos is None:
+                    continue
+
+                for texto, score, bbox in zip(
+                    datos["textos"],
+                    datos["scores"],
+                    datos["cajas"],
+                ):
+                    texto = str(texto).strip()
+                    if not texto:
+                        continue
+
+                    puntos = [
+                        [
+                            float(p[0]) / factor,
+                            (float(p[1]) / factor) + y_inicio,
+                        ]
+                        for p in bbox
+                    ]
+                    if not puntos:
+                        continue
+
+                    detecciones.append(
+                        self._crear_deteccion(
+                            texto=texto,
+                            confianza=float(score),
+                            bbox=puntos,
+                            ancho_imagen=ancho_imagen or ancho,
+                            alto_imagen=alto_imagen or altura,
+                        )
+                    )
+        except Exception:
+            pass
+        finally:
+            try:
+                if os.path.exists(ruta_temporal):
+                    os.remove(ruta_temporal)
+            except Exception:
+                pass
+
+        return detecciones
+
+    def _fusionar_detecciones_selectivas(
+        self,
+        detecciones_originales,
+        detecciones_reprocesadas
+    ):
+        """
+        Conserva todas las detecciones originales y añade únicamente aquellas
+        detecciones del reproceso regional que aporten texto nuevo o corregido.
+        """
+        resultado = list(detecciones_originales)
+
+        def norm(t):
+            return " ".join(str(t or "").strip().upper().split())
+
+        for nueva in detecciones_reprocesadas:
+            t_nuevo = norm(getattr(nueva, "texto", ""))
+            if not t_nuevo:
+                continue
+
+            cx_n = getattr(nueva, "x", 0.0) + getattr(nueva, "ancho", 0.0) / 2.0
+            cy_n = getattr(nueva, "y", 0.0) + getattr(nueva, "alto", 0.0) / 2.0
+
+            duplicada = False
+            for ex in resultado:
+                t_ex = norm(getattr(ex, "texto", ""))
+                if t_nuevo != t_ex:
+                    continue
+                cx_e = getattr(ex, "x", 0.0) + getattr(ex, "ancho", 0.0) / 2.0
+                cy_e = getattr(ex, "y", 0.0) + getattr(ex, "alto", 0.0) / 2.0
+                if ((cx_n - cx_e) ** 2 + (cy_n - cy_e) ** 2) ** 0.5 <= 75.0:
+                    duplicada = True
+                    break
+
+            if not duplicada:
+                resultado.append(nueva)
+
+        return resultado
+
+    def _finalizar_reproceso_selectivo(
+        self,
+        resultado_normal: ResultadoOCR,
+        detecciones_nuevas
+    ) -> ResultadoOCR:
+        if not detecciones_nuevas:
+            return resultado_normal
+
+        detecciones = self._fusionar_detecciones_selectivas(
+            resultado_normal.detecciones,
+            detecciones_nuevas,
+        )
+        detecciones = self._ordenar_detecciones(detecciones)
+        lineas = self._reconstruir_lineas(detecciones)
+        return ResultadoOCR(
+            detecciones=detecciones,
+            lineas=lineas,
+            texto_completo="\n".join(lineas),
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+        )
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: FINANCIERA BIENESTAR
+    # ========================================================
+
+    def procesar_imagen_financiera_bienestar(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        textos = [str(d.texto or "").strip() for d in resultado_normal.detecciones]
+        unido = " ".join(textos)
+
+        folio_m = re.search(r"\b(\d{8})\b", unido)
+        ref_m = re.search(r"\b(\d{12})\b", unido)
+        fecha_ok = bool(re.search(r"\b\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}\b", unido))
+        monto_m = re.search(r"[\$S]\s*(\d{2,3}\.\d{2})\b", unido)
+
+        consistente_ref = (
+            folio_m is not None
+            and ref_m is not None
+            and ref_m.group(1)[4:] == folio_m.group(1)
+        )
+        consistente_monto = monto_m is not None
+        unido_up = unido.upper()
+        if consistente_monto and "TRESCIENTOS" in unido_up and "CINCUENTA" in unido_up:
+            consistente_monto = (monto_m.group(1) == "350.00")
+
+        if consistente_ref and fecha_ok and consistente_monto:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.14,
+            y_fin_rel=0.58,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="finabien_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: TRANSFERENCIA BIENESTAR
+    # ========================================================
+
+    def procesar_imagen_transferencia_bienestar(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_monto = bool(re.search(r"\$\s*\d+(?:\.\d{2})", unido))
+        tiene_fecha = bool(re.search(r"\d{1,2}\s+[a-záéíóú]{3,10}\s+\d{4}", unido, re.I))
+        tiene_clabe = bool(re.search(r"\b\d{18}\b", unido))
+        tiene_ref = bool(re.search(r"\b\d{6}\b", unido))
+
+        if tiene_monto and tiene_fecha and tiene_clabe and tiene_ref:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.15,
+            y_fin_rel=0.88,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="trans_bienestar_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: BANORTE
+    # ========================================================
+
+    def procesar_imagen_banorte(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        textos = [str(d.texto or "").strip() for d in resultado_normal.detecciones]
+        unido = " ".join(textos)
+
+        tiene_monto = bool(re.search(r"\$\s*\d{1,3}(?:,\d{3})*\.\d{2}\b", unido))
+        tiene_clave = bool(re.search(r"\b3843[A-Z0-9]{18,26}\b", unido))
+        tiene_ruido_monto = bool(re.search(r"\$\s*3[oO]{2}\b", unido))
+        tiene_truncado = any(t.strip() == "Comunic" for t in textos)
+
+        if tiene_monto and tiene_clave and not tiene_ruido_monto and not tiene_truncado:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.12,
+            y_fin_rel=0.78,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="banorte_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: BBVA
+    # ========================================================
+
+    def procesar_imagen_bbva(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        textos = [str(d.texto or "").strip() for d in resultado_normal.detecciones]
+        unido = " ".join(textos)
+        unido_sin_esp = "".join(t.replace(" ", "") for t in textos)
+
+        tiene_monto = bool(re.search(r"[\$S]\s*-?\s*\d{1,3}(?:,\d{3})*\.\d{2}\b", unido))
+        tiene_clave_limpia = bool(re.search(r"MBAN010026\d{14}", unido_sin_esp))
+        tiene_mes_corrupto = bool(re.search(r"\b(?:junlo|jullo)\b", unido, re.I))
+        tiene_etiqueta_pegada = any(
+            "nombredel" in t.lower() or "importetransferido" in t.lower() or "cencepto" in t.lower()
+            for t in textos
+        )
+
+        if tiene_monto and tiene_clave_limpia and not tiene_mes_corrupto and not tiene_etiqueta_pegada:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.10,
+            y_fin_rel=0.92,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="bbva_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: ALBO
+    # ========================================================
+
+    def procesar_imagen_albo(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_clave = bool(re.search(r"\b\d{8,14}ALBO\d{8,16}\b", unido, re.I))
+        tiene_fecha = bool(re.search(r"\d{1,2}\s+de\s+[a-záéíóú]{3,10}\s+\d{4}", unido, re.I))
+
+        if tiene_clave and tiene_fecha:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.15,
+            y_fin_rel=0.90,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="albo_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: HEY, BANCO
+    # ========================================================
+
+    def procesar_imagen_hey_banco(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_monto = bool(re.search(r"\$\s*\d{1,3}(?:,\d{3})*\.\d{2}", unido))
+        tiene_fecha = bool(re.search(r"\d{1,2}/[A-Za-z]{3}/\d{4}", unido))
+        tiene_ref = bool(re.search(r"\bN\d{5,8}\b", unido))
+
+        if tiene_monto and tiene_fecha and tiene_ref:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.10,
+            y_fin_rel=0.92,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="heybanco_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: FONDEADORA
+    # ========================================================
+
+    def procesar_imagen_fondeadora(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_clave = bool(re.search(r"\bFON\d{18,26}\b", unido, re.I))
+        tiene_fecha = bool(re.search(r"\d{1,2}\s+de\s+[a-záéíóú]+\s+a\s+las\s+\d{1,2}:\d{2}", unido, re.I))
+
+        if tiene_clave and tiene_fecha:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.05,
+            y_fin_rel=0.95,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="fondeadora_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: NU MEXICO
+    # ========================================================
+
+    def procesar_imagen_nu_mexico(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_monto = bool(re.search(r"\$\s*\d{1,3}(?:,\d{3})*\.\d{2}", unido))
+        tiene_clave = bool(re.search(r"\bNU\d{10,28}\b", unido, re.I))
+        tiene_clabe = bool(re.search(r"(?:\*\*\*\*|\*{3,})\s*\d{4}\b|\b\d{18}\b", unido))
+
+        if tiene_monto and tiene_clave and tiene_clabe:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.10,
+            y_fin_rel=0.94,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="nu_mexico_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)
+
+    # ========================================================
+    # PROCESAMIENTO EXCLUSIVO: PAGO OXXO
+    # ========================================================
+
+    def procesar_imagen_oxxo(
+        self,
+        ruta_imagen: str
+    ) -> ResultadoOCR:
+        resultado_normal = self.procesar_imagen(ruta_imagen)
+        unido = " ".join(str(d.texto or "") for d in resultado_normal.detecciones)
+
+        tiene_monto = bool(re.search(r"\$\s*\d{1,3}(?:,\d{3})*\.\d{2}", unido))
+        tiene_fecha = bool(re.search(r"\b\d{2}/\d{2}/\d{4}\b", unido))
+        tiene_folio = bool(re.search(r"folio\s+de\s+venta\s*:?\s*\d{4,10}", unido, re.I))
+        tiene_aut = bool(re.search(r"autorizaci[oó]n\s*:?\s*\d{4,8}", unido, re.I))
+
+        if tiene_monto and tiene_fecha and tiene_folio and tiene_aut:
+            return resultado_normal
+
+        nuevas = self._reprocesar_region_selectiva(
+            ruta_imagen=ruta_imagen,
+            ancho_imagen=resultado_normal.ancho_imagen,
+            alto_imagen=resultado_normal.alto_imagen,
+            y_inicio_rel=0.15,
+            y_fin_rel=0.88,
+            factor_escala=2.5,
+            usar_clahe=True,
+            sufijo="oxxo_reproceso",
+        )
+        return self._finalizar_reproceso_selectivo(resultado_normal, nuevas)

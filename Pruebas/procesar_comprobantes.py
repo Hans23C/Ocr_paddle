@@ -2,14 +2,16 @@ from pathlib import Path
 import json
 import sys
 
+RAIZ_PROYECTO = Path(__file__).resolve().parent.parent
+if str(RAIZ_PROYECTO) not in sys.path:
+    sys.path.insert(0, str(RAIZ_PROYECTO))
+
 from Services.ocr import PaddleOCRServicio
 
 
 # ============================================================
 # RUTAS
 # ============================================================
-
-RAIZ_PROYECTO = Path(__file__).resolve().parent.parent
 
 CARPETA_COMPROBANTES = (
     RAIZ_PROYECTO
@@ -20,6 +22,17 @@ CARPETA_RESULTADOS = (
     RAIZ_PROYECTO
     / "Resultados_OCR"
 )
+
+MAPA_CARPETAS_ENTRADA = {
+    "HEY_BANCO": Path("HEY, BANCO"),
+    "HEY, BANCO": Path("HEY, BANCO"),
+    "FINANCIERA_BIENESTAR": Path("BIENESTAR") / "PAGO_FINANCIERA_BIENESTAR",
+    "TRANSFERENCIA_BIENESTAR": Path("BIENESTAR") / "TRANSFERECIA",
+}
+
+MAPA_CARPETAS_SALIDA = {
+    "HEY, BANCO": "HEY_BANCO",
+}
 
 
 # ============================================================
@@ -59,7 +72,7 @@ def convertir_deteccion(deteccion):
 # PROCESAR BANCO
 # ============================================================
 
-def procesar_banco(nombre_banco):
+def procesar_banco(nombre_banco, ocr=None):
 
     # --------------------------------------------------------
     # Normalizar nombre
@@ -71,14 +84,24 @@ def procesar_banco(nombre_banco):
         .upper()
     )
 
+    subruta_entrada = MAPA_CARPETAS_ENTRADA.get(
+        nombre_banco,
+        Path(nombre_banco)
+    )
+
+    nombre_salida = MAPA_CARPETAS_SALIDA.get(
+        nombre_banco,
+        nombre_banco
+    )
+
     carpeta_banco = (
         CARPETA_COMPROBANTES
-        / nombre_banco
+        / subruta_entrada
     )
 
     carpeta_resultados = (
         CARPETA_RESULTADOS
-        / nombre_banco
+        / nombre_salida
     )
 
     # --------------------------------------------------------
@@ -89,7 +112,7 @@ def procesar_banco(nombre_banco):
 
     print("=" * 70)
     print(
-        f"PRUEBA PADDLEOCR - {nombre_banco}"
+        f"PRUEBA PADDLEOCR - {nombre_salida}"
     )
     print("=" * 70)
 
@@ -149,39 +172,40 @@ def procesar_banco(nombre_banco):
     # INICIALIZAR OCR
     # --------------------------------------------------------
 
-    print(
-        "Inicializando PaddleOCR..."
-    )
-
-    try:
-
-        ocr = PaddleOCRServicio(
-            idioma="es"
+    if ocr is None:
+        print(
+            "Inicializando PaddleOCR..."
         )
 
-    except Exception as error:
+        try:
+
+            ocr = PaddleOCRServicio(
+                idioma="es"
+            )
+
+        except Exception as error:
+
+            print()
+
+            print(
+                "ERROR INICIALIZANDO PADDLEOCR:"
+            )
+
+            print(
+                type(error).__name__
+            )
+
+            print(
+                error
+            )
+
+            return
+
+        print(
+            "PaddleOCR inicializado correctamente."
+        )
 
         print()
-
-        print(
-            "ERROR INICIALIZANDO PADDLEOCR:"
-        )
-
-        print(
-            type(error).__name__
-        )
-
-        print(
-            error
-        )
-
-        return
-
-    print(
-        "PaddleOCR inicializado correctamente."
-    )
-
-    print()
 
     # --------------------------------------------------------
     # OBTENER IMÁGENES
@@ -268,7 +292,7 @@ def procesar_banco(nombre_banco):
             #
             # ------------------------------------------------
 
-            if nombre_banco == "SANTANDER":
+            if nombre_salida == "SANTANDER":
 
                 resultado = (
                     ocr.procesar_imagen(
@@ -277,7 +301,7 @@ def procesar_banco(nombre_banco):
                     )
                 )
 
-            elif nombre_banco == "KLAR":
+            elif nombre_salida == "KLAR":
 
                 resultado = (
                     ocr.procesar_imagen_klar(
@@ -285,10 +309,82 @@ def procesar_banco(nombre_banco):
                     )
                 )
 
-            elif nombre_banco == "FARMACIAS_DE_AHORRO":
+            elif nombre_salida == "FARMACIAS_DE_AHORRO":
 
                 resultado = (
                     ocr.procesar_imagen_farmacias(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "FINANCIERA_BIENESTAR":
+
+                resultado = (
+                    ocr.procesar_imagen_financiera_bienestar(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "TRANSFERENCIA_BIENESTAR":
+
+                resultado = (
+                    ocr.procesar_imagen_transferencia_bienestar(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "BANORTE":
+
+                resultado = (
+                    ocr.procesar_imagen_banorte(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "BBVA":
+
+                resultado = (
+                    ocr.procesar_imagen_bbva(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "ALBO":
+
+                resultado = (
+                    ocr.procesar_imagen_albo(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "HEY_BANCO":
+
+                resultado = (
+                    ocr.procesar_imagen_hey_banco(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "FONDEADORA":
+
+                resultado = (
+                    ocr.procesar_imagen_fondeadora(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "NU_MEXICO":
+
+                resultado = (
+                    ocr.procesar_imagen_nu_mexico(
+                        str(archivo)
+                    )
+                )
+
+            elif nombre_salida == "PAGO_OXXO":
+
+                resultado = (
+                    ocr.procesar_imagen_oxxo(
                         str(archivo)
                     )
                 )
@@ -309,7 +405,7 @@ def procesar_banco(nombre_banco):
 
                 "archivo": archivo.name,
 
-                "banco": nombre_banco,
+                "banco": nombre_salida,
 
                 "ancho_imagen":
                     resultado.ancho_imagen,
@@ -552,18 +648,19 @@ def main():
         return
 
     # --------------------------------------------------------
-    # Obtener banco
+    # Obtener banco(s)
     # --------------------------------------------------------
 
-    nombre_banco = sys.argv[1]
-
-    # --------------------------------------------------------
-    # Procesar
-    # --------------------------------------------------------
-
-    procesar_banco(
-        nombre_banco
-    )
+    ocr_compartido = None
+    for nombre_banco in sys.argv[1:]:
+        if ocr_compartido is None:
+            print("Inicializando PaddleOCR...")
+            ocr_compartido = PaddleOCRServicio(idioma="es")
+            print("PaddleOCR inicializado correctamente.\n")
+        procesar_banco(
+            nombre_banco,
+            ocr=ocr_compartido
+        )
 
 
 # ============================================================

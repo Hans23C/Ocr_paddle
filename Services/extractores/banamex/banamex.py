@@ -40,6 +40,15 @@ class BanamexExtractor:
             if texto.lower() == "banamex":
                 return "Banamex"
 
+        for deteccion in detecciones:
+
+            texto = str(
+                deteccion.get("texto", "")
+            ).strip().lower()
+
+            if "banamex" in texto or "citibanamex" in texto:
+                return "Banamex"
+
         return None
 
     # ============================================================

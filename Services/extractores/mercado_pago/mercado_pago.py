@@ -377,8 +377,8 @@ def extraer_ordenante(lineas):
 
         linea_norm = normalizar_busqueda(linea)
 
-        # Caso: "De"
-        if linea_norm == "de":
+        # Caso: "De" o ruido OCR como "è De"
+        if linea_norm == "de" or re.fullmatch(r"[^a-z0-9]*[eè]?\s*de", linea_norm):
 
             if indice + 1 < len(lineas):
 
@@ -412,8 +412,8 @@ def extraer_ordenante(lineas):
 
             return titular, cuenta
 
-        # Caso OCR: "De Nombre..."
-        if linea_norm.startswith("de "):
+        # Caso OCR: "De Nombre..." (excluyendo continuación de razón social como "De C", "De CV", "De RL")
+        if linea_norm.startswith("de ") and not re.match(r"^de\s+(c|cv|rl|r\.l\.|c\.v\.)\b", linea_norm):
 
             candidato = linea[
                 len("de "):
@@ -428,6 +428,19 @@ def extraer_ordenante(lineas):
                 limite=8
             )
 
+            return titular, cuenta
+
+    # Caso formato "Origen y destino" (Transferencia enviada)
+    for indice, linea in enumerate(lineas):
+        if "origen y destino" in normalizar_busqueda(linea):
+            for j in range(indice + 1, min(indice + 5, len(lineas))):
+                cand = normalizar_texto(lineas[j]).rstrip("> ").strip()
+                if "mercado pago" in normalizar_busqueda(cand) and not titular:
+                    titular = cand
+                if "|" in cand and not cuenta:
+                    partes = [p.strip() for p in cand.split("|") if p.strip()]
+                    if partes:
+                        cuenta = partes[-1]
             return titular, cuenta
 
     return titular, cuenta
@@ -480,10 +493,20 @@ def extraer_beneficiario(lineas):
                 flags=re.IGNORECASE
             )
 
-            if match:
+            if match and normalizar_texto(match.group(1)):
                 candidato = normalizar_texto(
                     match.group(1)
                 )
+            else:
+                antes = normalizar_texto(
+                    re.sub(r"\bpara\b.*$", "", linea, flags=re.IGNORECASE)
+                )
+                if antes:
+                    if indice + 1 < len(lineas):
+                        sig = normalizar_texto(lineas[indice + 1])
+                        if sig and normalizar_busqueda(sig) not in ("hsbc",) and not normalizar_busqueda(sig).startswith("clabe"):
+                            antes = f"{antes} {sig}"
+                    candidato = antes
 
         if posicion_para is None:
             continue
@@ -520,7 +543,7 @@ def extraer_beneficiario(lineas):
                 texto
             )
 
-            if texto_norm == "hsbc":
+            if texto_norm == "hsbc" or texto_norm.endswith(" hsbc"):
                 banco = "HSBC"
 
             # No aceptar cualquier texto como cuenta.
@@ -541,6 +564,31 @@ def extraer_beneficiario(lineas):
 
         return titular, banco, cuenta
 
+    # Caso formato "Transferencia enviada / Origen y destino"
+    for indice, linea in enumerate(lineas):
+        if "origen y destino" in normalizar_busqueda(linea):
+            idx_monto = None
+            idx_enviada = None
+            for k, l in enumerate(lineas):
+                if idx_monto is None and l.strip().startswith("$"):
+                    idx_monto = k
+                if "transferencia enviada" in normalizar_busqueda(l):
+                    idx_enviada = k
+                    break
+            if idx_monto is not None and idx_enviada is not None and idx_enviada > idx_monto + 1:
+                partes_benef = [normalizar_texto(lineas[k]) for k in range(idx_monto + 1, idx_enviada) if normalizar_texto(lineas[k])]
+                if partes_benef:
+                    titular = " ".join(partes_benef)
+            for j in range(indice + 1, min(indice + 10, len(lineas))):
+                t_norm = normalizar_busqueda(lineas[j])
+                if "hsbc" in t_norm:
+                    banco = "HSBC"
+                if "clabe" in t_norm or "tarjeta" in t_norm:
+                    cuenta = extraer_dato_bancario(lineas, j, limite=3)
+                    if cuenta:
+                        break
+            return titular, banco, cuenta
+
     return titular, banco, cuenta
 
 
@@ -549,27 +597,42 @@ def extraer_beneficiario(lineas):
 # ============================================================
 
 def extraer_numero_referencia(lineas):
+    valor_prio = buscar_etiqueta(lineas, ["Número de referencia", "Numero de referencia", "Referencia adicional"])
+    if valor_prio:
+        m_p = re.search(r"\b\d+\b", valor_prio)
+        if m_p:
+            return m_p.group(0)
 
     valor = buscar_etiqueta(
         lineas,
         [
             "Número de referencia",
             "Numero de referencia",
+            "Referencia adicional",
+            "N.° de operación",
+            "N.º de operación",
+            "N. de operación",
         ]
     )
 
-    if not valor:
-        return None
+    if valor:
+        match = re.search(
+            r"\b\d+\b",
+            valor
+        )
+        if match:
+            return match.group(0)
 
-    match = re.search(
-        r"\b\d+\b",
-        valor
+    valor_comp = buscar_etiqueta(
+        lineas,
+        ["Comprobante"]
     )
+    if valor_comp:
+        m_comp = re.search(r"#?\s*([A-Za-z0-9]{6,})", valor_comp)
+        if m_comp:
+            return m_comp.group(1)
 
-    if not match:
-        return None
-
-    return match.group(0)
+    return None
 
 
 # ============================================================
@@ -787,7 +850,7 @@ def extraer_transferencia(lineas):
         lineas
     )
 
-    return {
+    resultado = {
         "banco": campo_encontrado(
             BANCO
         ),
@@ -832,12 +895,24 @@ def extraer_transferencia(lineas):
             campo_encontrado(
                 referencia
             ),
-
-        "concepto":
-            campo_encontrado(
-                concepto
-            ),
     }
+
+    if concepto:
+        resultado["concepto"] = campo_encontrado(
+            concepto
+        )
+    clave_r = buscar_etiqueta(lineas, ["Clave de rastreo", "Clave de Rastreo"])
+    if clave_r:
+        resultado["clave_rastreo"] = campo_encontrado(clave_r)
+    num_op = buscar_etiqueta(lineas, ["N.° de operación", "N.º de operación", "N. de operación"])
+    if num_op:
+        resultado["numero_operacion"] = campo_encontrado(num_op)
+    if False:
+        resultado["concepto"] = campo_encontrado(
+            concepto
+        )
+
+    return resultado
 
 
 # ============================================================

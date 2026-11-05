@@ -1244,6 +1244,10 @@ def extraer(
             ),
 
         "campos": {
+            "banco":
+                extraer_banco(
+                    datos_json
+                ),
 
             "beneficiario":
                 extraer_beneficiario(

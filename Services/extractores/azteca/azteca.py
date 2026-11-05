@@ -3260,7 +3260,7 @@ class AztecaExtractor:
         # Después, etiqueta y valor en detecciones consecutivas.
         for indice, deteccion in enumerate(detecciones_preparadas):
             texto = normalizar(deteccion.get("texto", ""))
-            if texto not in ("folio", "folio:", "folio-"):
+            if texto not in ("folio", "folio:", "folio-", "follo", "follo:", "fol1o", "foli0"):
                 continue
             siguientes = detecciones_preparadas[indice + 1:indice + 4]
             for candidata in siguientes:
@@ -3306,7 +3306,8 @@ class AztecaExtractor:
                 "concepto": valor("concepto"),
                 "referencia": valor("referencia"),
 
-                "clave_rastreo": valor("clave_rastreo"),
+                "folio": self._extraer_folio_hibrido(detecciones),
+                "clave_rastreo": (valor("clave_rastreo")[:-1] + "I") if valor("clave_rastreo").endswith("|") else valor("clave_rastreo"),
             },
         }
 

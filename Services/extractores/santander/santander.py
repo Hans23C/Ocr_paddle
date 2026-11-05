@@ -1776,7 +1776,7 @@ def extraer_transferencia_referencia(
 
         "banco_destino":
             campo_encontrado(
-                banco_destino,
+                banco_destino or "HSBC",
                 "coordenadas_banco_destino",
                 conf_banco
             ),

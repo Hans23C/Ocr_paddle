@@ -723,7 +723,7 @@ class SpinByOxxoExtractor:
         regex = re.compile(
             r"HSBC\s*-\s*"
             r"(?:\*+\s*)?"
-            r"(\d{10,20})",
+            r"(\*+\s*\d{4}|\d{10,20})",
             re.IGNORECASE
         )
 
@@ -908,7 +908,15 @@ class SpinByOxxoExtractor:
 
         indice = self._buscar_indice(
             detecciones,
-            r"n[uú]mero\s+de\s+referencia"
+            r"(?:n[uú]mero\s+de\s+referencia|referencia\s+num[eé]rica)"
+        )
+        if indice is not None and "numerica" in self._texto_norm(detecciones[indice]):
+            et_cep = detecciones[indice]
+            for d in detecciones:
+                if re.fullmatch(r"\d{5,10}", self._texto(d)) and abs(self._y(d) - self._y(et_cep)) <= 60:
+                    return self._crear_campo(self._texto(d), "etiqueta_referencia", self._confianza(d))
+        if False:
+            _ = (
         )
 
         if indice is None:
@@ -1216,6 +1224,8 @@ class SpinByOxxoExtractor:
             inicio,
             valor_inicio
         ) = candidatos[0]
+        if len(valor_inicio) >= 27:
+            return self._crear_campo(valor_inicio, "etiqueta_clave_rastreo", self._confianza(inicio))
 
         partes = [
             valor_inicio
@@ -1576,7 +1586,11 @@ class SpinByOxxoExtractor:
                 )
             )
 
-        if candidatos_alineados:
+        tiene_prefijo_arriba = any(
+            self._x(du) > x_etiqueta and -35 <= (self._y(du) - y_etiqueta) < -5 and "pago" in self._texto_norm(du)
+            for du in detecciones
+        )
+        if candidatos_alineados and not tiene_prefijo_arriba:
 
             candidatos_alineados.sort(
                 key=lambda item: (

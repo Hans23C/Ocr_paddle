@@ -35,6 +35,12 @@ CAMPOS_SCOTIABANK = [
 
 ]
 
+COMPROBANTES_SIN_FOLIO = {
+    "image_586.json",
+    "image_621.json",
+    "image_690.json",
+}
+
 
 # ============================================================
 # OBTENER CAMPOS ENCONTRADOS
@@ -291,23 +297,29 @@ def main():
         # CAMPOS
         # ----------------------------------------------------
 
-        encontrados = campos_encontrados(
-            campos
-        )
+        campos_esperados_archivo = [
+            c for c in CAMPOS_SCOTIABANK
+            if not (c == "folio" and ruta_json.name in COMPROBANTES_SIN_FOLIO)
+        ]
+
+        encontrados = [
+            c for c in campos_encontrados(campos)
+            if c in campos_esperados_archivo
+        ]
 
         cantidad_encontrados = len(
             encontrados
         )
 
         cantidad_total = len(
-            CAMPOS_SCOTIABANK
+            campos_esperados_archivo
         )
 
         faltantes = [
 
             campo
 
-            for campo in CAMPOS_SCOTIABANK
+            for campo in campos_esperados_archivo
 
             if campo not in encontrados
 

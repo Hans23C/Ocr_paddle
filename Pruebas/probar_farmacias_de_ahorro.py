@@ -20,7 +20,6 @@ import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from Services.ocr.paddle_ocr import PaddleOCRServicio
 from Services.extractores.farmacias_de_ahorro import crear_extractor
 
 
@@ -381,20 +380,8 @@ def ejecutar_prueba():
             # Inicializar OCR UNA SOLA VEZ.
             # ------------------------------------------------
 
-            print(
-                "Inicializando OCR de Farmacias..."
-            )
-
-            ocr = PaddleOCRServicio(
-                idioma="es"
-            )
-
+            ocr = None
             extractor = crear_extractor()
-
-            print(
-                "OCR inicializado."
-            )
-            print()
 
             procesados = 0
             errores = 0
@@ -423,64 +410,40 @@ def ejecutar_prueba():
                     print("No se realiza redimensionamiento.")
                     print("No se realiza recorte.")
                     print()
-                    print("Ejecutando OCR...")
-
-                    inicio_ocr = time.perf_counter()
-
-                    # IMPORTANTE:
-                    # Esta es la única llamada OCR utilizada.
-                    resultado_ocr = (
-                        ocr.procesar_imagen_farmacias(
-                            str(ruta_imagen)
-                        )
-                    )
-
-                    tiempo_ocr = (
-                        time.perf_counter()
-                        - inicio_ocr
-                    )
-
-                    print()
-                    print(
-                        f"OCR terminado en "
-                        f"{tiempo_ocr:.3f} s"
-                    )
-                    print()
-
-                    # ------------------------------------------------
-                    # ADAPTAR RESULTADO OCR
-                    # ------------------------------------------------
-                    # procesar_imagen_farmacias() devuelve un objeto
-                    # ResultadoOCR. El extractor de Farmacias trabaja
-                    # con la estructura tipo diccionario de las
-                    # detecciones.
-                    #
-                    # Si en algún momento el OCR devuelve directamente
-                    # un diccionario, se conserva ese comportamiento.
-                    # ------------------------------------------------
-                    if isinstance(resultado_ocr, dict):
-                        datos_ocr = resultado_ocr
-                    else:
-                        datos_ocr = resultado_ocr_a_dict(
-                            resultado_ocr
-                        )
-
-                    # ------------------------------------------------
-                    # El resultado generado por
-                    # procesar_imagen_farmacias ya contiene las
-                    # detecciones. Se adapta únicamente para guardarlo
-                    # como JSON y pasarlo al extractor.
-                    # ------------------------------------------------
-
                     ruta_json = (
                         CARPETA_RESULTADOS
                         / f"{ruta_imagen.stem}.json"
                     )
 
-                    guardar_json(
-                        ruta_json,
-                        datos_ocr
-                    )
+                    datos_ocr = cargar_resultado_json(ruta_json)
+                    if datos_ocr is not None:
+                        tiempo_ocr = 0.0
+                    else:
+                        print("Ejecutando OCR...")
+                        if ocr is None:
+                            from Services.ocr.paddle_ocr import PaddleOCRServicio
+                            ocr = PaddleOCRServicio(idioma="es")
+
+                        inicio_ocr = time.perf_counter()
+                        resultado_ocr = (
+                            ocr.procesar_imagen_farmacias(
+                                str(ruta_imagen)
+                            )
+                        )
+                        tiempo_ocr = (
+                            time.perf_counter()
+                            - inicio_ocr
+                        )
+                        if isinstance(resultado_ocr, dict):
+                            datos_ocr = resultado_ocr
+                        else:
+                            datos_ocr = resultado_ocr_a_dict(
+                                resultado_ocr
+                            )
+                        guardar_json(
+                            ruta_json,
+                            datos_ocr
+                        )
 
                     # ------------------------------------------------
                     # Extractor Farmacias

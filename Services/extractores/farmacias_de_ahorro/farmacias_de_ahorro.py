@@ -1174,7 +1174,7 @@ def extraer_monto(detecciones):
 
         diferencia_x = x - x_etiqueta
 
-        if diferencia_y <= 60 and 0 <= diferencia_x <= 150:
+        if diferencia_y <= 60 and 0 <= diferencia_x <= 1200:
 
             candidatos.append(
                 (
