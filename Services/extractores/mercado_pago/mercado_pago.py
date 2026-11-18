@@ -433,14 +433,29 @@ def extraer_ordenante(lineas):
     # Caso formato "Origen y destino" (Transferencia enviada)
     for indice, linea in enumerate(lineas):
         if "origen y destino" in normalizar_busqueda(linea):
+            idx_mp = None
             for j in range(indice + 1, min(indice + 5, len(lineas))):
                 cand = normalizar_texto(lineas[j]).rstrip("> ").strip()
                 if "mercado pago" in normalizar_busqueda(cand) and not titular:
                     titular = cand
+                    idx_mp = j
                 if "|" in cand and not cuenta:
                     partes = [p.strip() for p in cand.split("|") if p.strip()]
                     if partes:
                         cuenta = partes[-1]
+            if not cuenta and idx_mp is not None:
+                for k in range(idx_mp + 1, min(idx_mp + 3, len(lineas))):
+                    t_norm = normalizar_busqueda(lineas[k])
+                    if "spei" in t_norm or "comprobante" in t_norm:
+                        break
+                    if (
+                        "clabe" in t_norm
+                        or "numero de tarjeta" in t_norm
+                        or "número de tarjeta" in t_norm
+                    ):
+                        cuenta = extraer_dato_bancario(lineas, k, limite=2)
+                        if cuenta:
+                            break
             return titular, cuenta
 
     return titular, cuenta
@@ -575,18 +590,82 @@ def extraer_beneficiario(lineas):
                 if "transferencia enviada" in normalizar_busqueda(l):
                     idx_enviada = k
                     break
-            if idx_monto is not None and idx_enviada is not None and idx_enviada > idx_monto + 1:
-                partes_benef = [normalizar_texto(lineas[k]) for k in range(idx_monto + 1, idx_enviada) if normalizar_texto(lineas[k])]
-                if partes_benef:
-                    titular = " ".join(partes_benef)
-            for j in range(indice + 1, min(indice + 10, len(lineas))):
+            if idx_enviada is not None:
+                if idx_monto is not None and idx_enviada > idx_monto + 1:
+                    partes_benef = [normalizar_texto(lineas[k]) for k in range(idx_monto + 1, idx_enviada) if normalizar_texto(lineas[k])]
+                    if partes_benef:
+                        titular = " ".join(partes_benef)
+                for j in range(indice + 1, min(indice + 10, len(lineas))):
+                    t_norm = normalizar_busqueda(lineas[j])
+                    if "hsbc" in t_norm:
+                        banco = "HSBC"
+                    if "clabe" in t_norm or "tarjeta" in t_norm:
+                        cuenta = extraer_dato_bancario(lineas, j, limite=3)
+                        if cuenta:
+                            break
+                return titular, banco, cuenta
+
+            # Caso "Comprobante de transferencia" con "Origen y destino" (sin "De"/"Para" ni "Transferencia enviada")
+            inicio_benef = indice + 1
+            for j in range(indice + 1, min(indice + 6, len(lineas))):
                 t_norm = normalizar_busqueda(lineas[j])
-                if "hsbc" in t_norm:
-                    banco = "HSBC"
-                if "clabe" in t_norm or "tarjeta" in t_norm:
-                    cuenta = extraer_dato_bancario(lineas, j, limite=3)
-                    if cuenta:
-                        break
+                if "mercado pago" in t_norm:
+                    inicio_benef = j + 1
+                    if j + 1 < len(lineas):
+                        sig_norm = normalizar_busqueda(lineas[j + 1])
+                        if (
+                            "clabe" in sig_norm
+                            or "tarjeta" in sig_norm
+                            or "cuenta" in sig_norm
+                            or "saldo" in sig_norm
+                            or "|" in sig_norm
+                        ):
+                            inicio_benef = j + 2
+                    break
+
+            previos = []
+            for j in range(inicio_benef, min(inicio_benef + 6, len(lineas))):
+                texto = normalizar_texto(lineas[j])
+                t_norm = normalizar_busqueda(texto)
+                if not texto:
+                    continue
+                if (
+                    t_norm.startswith("comprobante")
+                    or "protegemos tu dinero" in t_norm
+                    or "seguridad de mercado pago" in t_norm
+                    or "clave de rastreo" in t_norm
+                    or "de operacion" in t_norm
+                    or "referencia" in t_norm
+                ):
+                    break
+                if (
+                    "clabe" in t_norm
+                    or "numero de tarjeta" in t_norm
+                    or "número de tarjeta" in t_norm
+                    or "numero de cuenta" in t_norm
+                    or "número de cuenta" in t_norm
+                ):
+                    cuenta = extraer_dato_bancario(lineas, j, limite=2)
+                    break
+                previos.append(texto)
+
+            if len(previos) >= 2:
+                banco = previos[-1]
+                titular = " ".join(previos[:-1])
+            elif len(previos) == 1:
+                p_norm = normalizar_busqueda(previos[0])
+                bancos_conocidos = (
+                    "hsbc", "bbva", "banamex", "citibanamex", "banorte", "santander",
+                    "scotiabank", "azteca", "bancoppel", "inbursa", "banbajio", "nu",
+                    "klar", "mercado pago", "stp", "spin", "albo", "stori", "plata",
+                    "hey", "fondeadora", "mifel", "compartamos", "revolut", "claro pay",
+                    "bienestar", "actinver", "afirme", "banregio", "multiva",
+                )
+                if any(b in p_norm for b in bancos_conocidos):
+                    banco = previos[0]
+                else:
+                    titular = previos[0]
+
             return titular, banco, cuenta
 
     return titular, banco, cuenta

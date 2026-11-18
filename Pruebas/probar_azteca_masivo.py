@@ -1,298 +1,145 @@
-import csv
+from pathlib import Path
 import json
 import sys
-import time
-from pathlib import Path
-from datetime import datetime
+import io
 
-# Raíz del proyecto: carpeta padre de Pruebas
-RAIZ_PROYECTO = Path(__file__).resolve().parents[1]
-
+RAIZ_PROYECTO = Path(__file__).resolve().parent.parent
 if str(RAIZ_PROYECTO) not in sys.path:
     sys.path.insert(0, str(RAIZ_PROYECTO))
 
-# Ajusta esta importación únicamente si tu archivo está
-# ubicado en otro paquete.
 from Services.extractores.azteca import AztecaExtractor
-
-
-# ------------------------------------------------------------
-# CONFIGURACIÓN
-# ------------------------------------------------------------
 
 CARPETA_JSON = RAIZ_PROYECTO / "Resultados_OCR" / "AZTECA"
 
-CARPETA_SALIDA = (
-    RAIZ_PROYECTO
-    / "Resultados_OCR"
-    / "AZTECA"
-    / "Pruebas_Azteca_Nuevo"
-)
-
-CAMPOS = [
+# Según Comprobane_Azteca.txt
+CAMPOS_PRIMARIOS = [
     "banco",
     "fecha",
     "monto",
-    "cuenta_origen",
-    "cuenta_destino",
-    "concepto",
-    "referencia",
-    "folio",
-    "clave_rastreo",
-]
-
-CAMPOS_OBLIGATORIOS = [
-    "banco",
-    "fecha",
-    "monto",
-    "cuenta_origen",
-    "cuenta_destino",
-    "concepto",
     "referencia",
     "clave_rastreo",
 ]
 
-
-def obtener_nombre_comprobante(datos, archivo_json):
-    """Obtiene el nombre de imagen guardado en el JSON."""
-    if isinstance(datos, dict):
-        for llave in ("archivo", "imagen", "nombre_archivo", "ruta"):
-            valor = datos.get(llave)
-            if isinstance(valor, str) and valor.strip():
-                return Path(valor).name
-
-    return archivo_json.stem
+CAMPOS_SECUNDARIOS = [
+    "cuenta_origen",
+    "cuenta_destino",
+    "concepto",
+]
 
 
-def valor_texto(valor):
-    """Convierte valores a texto sin inventar información."""
+def _validar_secundario_completo(valor):
     if valor is None:
-        return ""
+        return False
+    txt = str(valor).strip()
+    if not txt or txt.endswith("..."):
+        return False
+    return True
 
-    if isinstance(valor, (dict, list)):
-        return json.dumps(valor, ensure_ascii=False)
 
-    return str(valor).strip()
+def ejecutar_prueba():
+    print()
+    print("=" * 100)
+    print("PRUEBA FINAL MASIVA - AZTECA")
+    print("=" * 100)
+    print()
+
+    archivos_json = sorted(CARPETA_JSON.glob("*.json"))
+    print(f"Comprobantes encontrados: {len(archivos_json)}")
+    print()
+
+    extractor = AztecaExtractor()
+    completos = 0
+    incompletos = 0
+    primarios_ok_total = 0
+    secundarios_ok_total = 0
+
+    for indice, ruta_json in enumerate(archivos_json, start=1):
+        error_ejecucion = None
+        campos = {}
+
+        try:
+            with open(ruta_json, "r", encoding="utf-8") as f:
+                datos = json.load(f)
+
+            extraido = extractor.extraer(datos)
+            if isinstance(extraido, dict):
+                campos = dict(extraido.get("campos", {}) or {})
+                if not campos.get("banco"):
+                    campos["banco"] = extraido.get("banco")
+        except Exception as exc:
+            error_ejecucion = f"{type(exc).__name__}: {exc}"
+
+        faltantes_primarios = [
+            c for c in CAMPOS_PRIMARIOS
+            if campos.get(c) is None or str(campos.get(c)).strip() == ""
+        ]
+        faltantes_secundarios = [
+            c for c in CAMPOS_SECUNDARIOS
+            if not _validar_secundario_completo(campos.get(c))
+        ]
+
+        if not faltantes_primarios:
+            primarios_ok_total += 1
+        if not faltantes_secundarios:
+            secundarios_ok_total += 1
+
+        if not error_ejecucion and not faltantes_primarios and not faltantes_secundarios:
+            completos += 1
+            estado = "COMPLETO"
+        else:
+            incompletos += 1
+            estado = "INCOMPLETO"
+
+        print("=" * 100)
+        print(f"[{indice}/{len(archivos_json)}] {ruta_json.name} -> {estado}")
+        print("=" * 100)
+        if error_ejecucion:
+            print(f"  ERROR                 : {error_ejecucion}")
+        print("  [DATOS PRIMARIOS - 100% Exactos]")
+        for c in CAMPOS_PRIMARIOS:
+            print(f"    {c:<18}: {campos.get(c)}")
+        print("  [DATOS SECUNDARIOS - >=90% / Palabras Completas]")
+        for c in CAMPOS_SECUNDARIOS:
+            print(f"    {c:<18}: {campos.get(c)}")
+        if campos.get("folio"):
+            print(f"    {'folio':<18}: {campos.get('folio')}")
+        if faltantes_primarios:
+            print(f"  FALTANTES PRIMARIOS   : {', '.join(faltantes_primarios)}")
+        if faltantes_secundarios:
+            print(f"  FALTANTES SECUNDARIOS : {', '.join(faltantes_secundarios)}")
+        print()
+
+    total = len(archivos_json)
+    porcentaje = (completos / total * 100.0) if total else 0.0
+
+    print("=" * 100)
+    print("RESUMEN FINAL - AZTECA")
+    print("=" * 100)
+    print(f"Total comprobantes           : {total}")
+    print(f"Datos Primarios (100% OK)    : {primarios_ok_total}/{total}")
+    print(f"Datos Secundarios (>=90% OK) : {secundarios_ok_total}/{total}")
+    print(f"Completos                    : {completos}")
+    print(f"Incompletos                  : {incompletos}")
+    print(f"Efectividad                  : {porcentaje:.2f}%")
+    print("=" * 100)
 
 
 def main():
-    inicio_total = time.perf_counter()
+    carpeta_resultados = RAIZ_PROYECTO / "Resultados_Pruebas"
+    carpeta_resultados.mkdir(parents=True, exist_ok=True)
+    archivo_txt = carpeta_resultados / "resultado_masivo_azteca.txt"
 
-    if not CARPETA_JSON.is_dir():
-        print(f"ERROR: No existe la carpeta de JSON:")
-        print(CARPETA_JSON)
-        return
+    salida = io.StringIO()
+    stdout_original = sys.stdout
+    try:
+        sys.stdout = salida
+        ejecutar_prueba()
+    finally:
+        sys.stdout = stdout_original
 
-    archivos_json = sorted(CARPETA_JSON.rglob("*.json"))
-
-    # Evita procesar reportes de ejecuciones anteriores.
-    archivos_json = [
-        archivo for archivo in archivos_json
-        if CARPETA_SALIDA not in archivo.parents
-    ]
-
-    if not archivos_json:
-        print("No se encontraron archivos JSON para AZTECA.")
-        print(f"Ruta revisada: {CARPETA_JSON}")
-        return
-
-    CARPETA_SALIDA.mkdir(parents=True, exist_ok=True)
-
-    extractor = AztecaExtractor()
-    resultados = []
-
-    total = len(archivos_json)
-
-    print("=" * 70)
-    print("PRUEBA MASIVA - NUEVO EXTRACTOR AZTECA")
-    print("=" * 70)
-    print(f"JSON encontrados: {total}")
-    print(f"Entrada: {CARPETA_JSON}")
-    print(f"Salida:  {CARPETA_SALIDA}")
-    print()
-
-    for indice, archivo_json in enumerate(archivos_json, start=1):
-        inicio = time.perf_counter()
-
-        fila = {
-            "json": str(archivo_json.relative_to(CARPETA_JSON)),
-            "comprobante": archivo_json.stem,
-            "estado": "OK",
-            "error": "",
-            "tiempo_segundos": 0,
-        }
-
-        for campo in CAMPOS:
-            fila[campo] = ""
-
-        try:
-            with archivo_json.open("r", encoding="utf-8") as archivo:
-                datos = json.load(archivo)
-
-            if not isinstance(datos, (dict, list)):
-                raise ValueError(
-                    "El JSON no contiene un objeto ni una lista."
-                )
-
-            fila["comprobante"] = obtener_nombre_comprobante(
-                datos, archivo_json
-            )
-
-            resultado = extractor.extraer(datos)
-
-            if not isinstance(resultado, dict):
-                raise ValueError(
-                    "El extractor no devolvió un diccionario."
-                )
-
-            campos_extraidos = resultado.get("campos", {})
-
-            if not isinstance(campos_extraidos, dict):
-                raise ValueError(
-                    "La estructura resultado['campos'] no es válida."
-                )
-
-            fila["banco"] = valor_texto(
-                resultado.get("banco", "")
-            )
-
-            for campo in CAMPOS:
-                if campo == "banco":
-                    continue
-
-                fila[campo] = valor_texto(
-                    campos_extraidos.get(campo, "")
-                )
-
-            # Registrar campos vacíos para revisión.
-            faltantes = [
-                campo
-                for campo in CAMPOS_OBLIGATORIOS
-                if not fila.get(campo, "").strip()
-            ]
-
-            fila["campos_faltantes"] = ", ".join(faltantes)
-
-            if faltantes:
-                fila["estado"] = "REVISAR"
-
-        except Exception as error:
-            fila["estado"] = "ERROR"
-            fila["error"] = f"{type(error).__name__}: {error}"
-            fila["campos_faltantes"] = ", ".join(CAMPOS_OBLIGATORIOS)
-
-        fila["tiempo_segundos"] = round(
-            time.perf_counter() - inicio, 3
-        )
-
-        resultados.append(fila)
-
-        print(
-            f"[{indice}/{total}] "
-            f"{fila['comprobante']} | "
-            f"{fila['estado']} | "
-            f"{fila['tiempo_segundos']} s"
-        )
-
-        if fila["estado"] == "ERROR":
-            print(f"    Error: {fila['error']}")
-        elif fila["estado"] == "REVISAR":
-            print(f"    Faltantes: {fila['campos_faltantes']}")
-
-    # --------------------------------------------------------
-    # GUARDAR RESULTADOS
-    # --------------------------------------------------------
-
-    fecha_ejecucion = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    archivo_csv = (
-        CARPETA_SALIDA
-        / f"reporte_azteca_{fecha_ejecucion}.csv"
-    )
-
-    archivo_json = (
-        CARPETA_SALIDA
-        / f"reporte_azteca_{fecha_ejecucion}.json"
-    )
-
-    columnas = [
-        "json",
-        "comprobante",
-        "estado",
-        "banco",
-        "fecha",
-        "monto",
-        "cuenta_origen",
-        "cuenta_destino",
-        "concepto",
-        "referencia",
-        "folio",
-        "clave_rastreo",
-        "campos_faltantes",
-        "tiempo_segundos",
-        "error",
-    ]
-
-    with archivo_csv.open(
-        "w", newline="", encoding="utf-8-sig"
-    ) as archivo:
-        escritor = csv.DictWriter(
-            archivo, fieldnames=columnas, extrasaction="ignore"
-        )
-        escritor.writeheader()
-        escritor.writerows(resultados)
-
-    with archivo_json.open("w", encoding="utf-8") as archivo:
-        json.dump(
-            resultados,
-            archivo,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    # --------------------------------------------------------
-    # RESUMEN ESTADÍSTICO
-    # --------------------------------------------------------
-
-    exitosos = sum(r["estado"] == "OK" for r in resultados)
-    revisar = sum(r["estado"] == "REVISAR" for r in resultados)
-    errores = sum(r["estado"] == "ERROR" for r in resultados)
-
-    print()
-    print("=" * 70)
-    print("RESUMEN DE LA PRUEBA")
-    print("=" * 70)
-    print(f"Total procesados: {len(resultados)}")
-    print(f"Sin campos obligatorios vacíos: {exitosos}")
-    print(f"Con campos para revisar:         {revisar}")
-    print(f"Con errores de ejecución:        {errores}")
-
-    print()
-    print("COMPLETITUD POR CAMPO")
-
-    for campo in CAMPOS:
-        presentes = sum(
-            bool(r.get(campo, "").strip())
-            for r in resultados
-        )
-        porcentaje = (
-            presentes / len(resultados) * 100
-            if resultados else 0
-        )
-
-        print(
-            f"{campo:18} "
-            f"{presentes:4}/{len(resultados):<4} "
-            f"({porcentaje:.2f} %)"
-        )
-
-    tiempo_total = time.perf_counter() - inicio_total
-
-    print()
-    print(f"Tiempo total: {tiempo_total:.2f} segundos")
-    print(f"CSV:  {archivo_csv}")
-    print(f"JSON: {archivo_json}")
-    print("=" * 70)
+    contenido = salida.getvalue()
+    archivo_txt.write_text(contenido, encoding="utf-8")
+    print(contenido)
 
 
 if __name__ == "__main__":
